@@ -1,0 +1,18 @@
+
+let foo = 3
+let a = foo
+
+let MySize = uint
+
+let main = (int8 foo = 23) int8 {
+    let foo1 = [foo, a, 1, 2]
+}
+
+let f = main(2)
+
+let Data = type(Foo) [
+    [int8] data = 23,
+    MySize capacity,
+]
+
+let Foo = int8

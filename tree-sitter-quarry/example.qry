@@ -1,0 +1,18 @@
+let foo = 23
+
+let Foo = int8
+
+let main = (int8 foo = 23) int8 {
+    :foo()
+    let foo = [a: 2, 2, 3]
+}
+
+let Read = protocol {
+    let read = (Self self, [mut uint8] buf) int8
+}
+
+:foo
+let Data = type(uint8) [
+    [int8] data = 23,
+    uint capcity,
+]
