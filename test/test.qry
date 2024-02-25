@@ -2,7 +2,7 @@
 let foo = 3
 let a = foo
 
-let MySize = uint
+let MySize = uint?mut &?
 
 let main = (int8 foo = 23) int8 {
     let foo1 = [foo, a, 1, 2]
@@ -10,9 +10,6 @@ let main = (int8 foo = 23) int8 {
 
 let f = main(2)
 
-let Data = type(Foo) [
-    [int8] data = 23,
-    MySize capacity,
-]
+let Foo = Data
+let Data = type(int) uint A | B
 
-let Foo = int8

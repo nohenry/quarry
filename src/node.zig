@@ -4,6 +4,10 @@ const tokenize = @import("tokenize.zig");
 pub const NodeId = packed struct {
     file: u32,
     index: u32,
+
+    pub inline fn eql(self: NodeId, other: NodeId) bool {
+        return self.file == other.file and self.index == other.index;
+    }
 };
 
 pub const NodeRange = packed struct {

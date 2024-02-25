@@ -18,10 +18,24 @@ pub const BaseType = union(enum) {
     slice: struct { base: Type, mut: bool },
     optional: struct { base: Type },
     reference: struct { base: Type, mut: bool },
+
+    record: struct {
+        backing_field: ?Type,
+        fields: Type,
+    },
+    @"union": struct {
+        backing_field: ?Type,
+        variants: Type,
+    },
+    alias: Type,
+    named: node.NodeId,
+
     type: Type,
 
     multi_type: []const Type,
     multi_type_impl: MultiType,
+    multi_type_keyed: std.StringHashMap(Type),
+    multi_type_keyed_impl: usize,
 
     func: struct {
         params: Type,
@@ -30,6 +44,7 @@ pub const BaseType = union(enum) {
 };
 
 pub const MultiType = struct { start: u32, len: u32 };
+pub const MultiTypeKeyed = struct { name: []const u8, ty: Type };
 
 pub const BaseTypeContext = struct {
     interner: *const TypeInterner,
@@ -49,6 +64,26 @@ pub const BaseTypeContext = struct {
 
                 return std.mem.eql(Type, vals, ctx.interner.multi_types.items[ind.start .. ind.start + ind.len]);
             },
+            .multi_type_keyed => |vals| {
+                if (b != .multi_type_keyed_impl) return false;
+
+                const bmap = &ctx.interner.multi_types_keyed.items[b.multi_type_keyed_impl];
+                if (vals.count() != bmap.count()) return false;
+
+                var ait = vals.iterator();
+                var bit = bmap.iterator();
+                var aval = ait.next();
+                var bval = bit.next();
+                while (aval != null and bval != null) {
+                    if (aval.?.value_ptr.* != bval.?.value_ptr.*) return false;
+                    if (!std.mem.eql(u8, aval.?.key_ptr.*, bval.?.key_ptr.*)) return false;
+
+                    aval = ait.next();
+                    bval = bit.next();
+                }
+
+                return true;
+            },
             else => return std.meta.eql(a, b),
         }
     }
@@ -67,6 +102,7 @@ pub const TypeInterner = struct {
     allocator: std.mem.Allocator,
     types: TypeMap,
     multi_types: std.ArrayList(Type),
+    multi_types_keyed: std.ArrayList(std.StringHashMap(Type)),
 
     const Self = @This();
 
@@ -75,6 +111,7 @@ pub const TypeInterner = struct {
             .allocator = allocator,
             .types = undefined,
             .multi_types = std.ArrayList(Type).init(allocator),
+            .multi_types_keyed = std.ArrayList(std.StringHashMap(Type)).init(allocator),
         };
     }
 
@@ -157,20 +194,48 @@ pub const TypeInterner = struct {
         return self.createOrGetTy(.str);
     }
 
-    pub fn arrayTy(self: Self, base: Type, size: usize) Type {
+    pub fn arrayTy(self: *Self, base: Type, size: usize) Type {
         return self.createOrGetTy(.{ .array = .{ .base = base, .size = size } });
     }
 
-    pub fn sliceTy(self: Self, base: Type, mut: bool) Type {
+    pub fn sliceTy(self: *Self, base: Type, mut: bool) Type {
         return self.createOrGetTy(.{ .slice = .{ .base = base, .mut = mut } });
     }
 
-    pub fn optionalTy(self: Self, base: Type) Type {
+    pub fn optionalTy(self: *Self, base: Type) Type {
         return self.createOrGetTy(.{ .optional = .{ .base = base } });
     }
 
-    pub fn referenceTy(self: Self, base: Type, mut: bool) Type {
+    pub fn referenceTy(self: *Self, base: Type, mut: bool) Type {
         return self.createOrGetTy(.{ .reference = .{ .base = base, .mut = mut } });
+    }
+
+    pub fn recordTy(self: *Self, backing_field: ?Type, fields: std.StringHashMap(Type)) Type {
+        const field_tys = self.multiTyKeyed(fields);
+        return self.createOrGetTy(.{
+            .record = .{
+                .backing_field = backing_field,
+                .fields = field_tys,
+            },
+        });
+    }
+
+    pub fn unionTy(self: *Self, backing_field: ?Type, variants: std.StringHashMap(Type)) Type {
+        const variant_tys = self.multiTyKeyed(variants);
+        return self.createOrGetTy(.{
+            .@"union" = .{
+                .backing_field = backing_field,
+                .variants = variant_tys,
+            },
+        });
+    }
+
+    pub fn aliasTy(self: *Self, base: Type) Type {
+        return self.createOrGetTy(.{ .alias = base });
+    }
+
+    pub fn namedTy(self: *Self, node_id: node.NodeId) Type {
+        return self.createOrGetTy(.{ .named = node_id });
     }
 
     pub fn typeTy(self: *Self, base: Type) Type {
@@ -193,6 +258,24 @@ pub const TypeInterner = struct {
                 .start = @truncate(starti),
                 .len = @truncate(endi - starti),
             },
+        };
+
+        ty.value_ptr.* = val;
+        return ty.value_ptr.*;
+    }
+
+    pub fn multiTyKeyed(self: *Self, values: std.StringHashMap(Type)) Type {
+        const ty = self.types.getOrPut(.{ .multi_type_keyed = values }) catch unreachable;
+        if (ty.found_existing) {
+            return ty.value_ptr.*;
+        }
+
+        const index = self.multi_types_keyed.items.len;
+        self.multi_types_keyed.append(values) catch unreachable;
+
+        const val = self.allocator.create(BaseType) catch unreachable;
+        val.* = .{
+            .multi_type_keyed_impl = index,
         };
 
         ty.value_ptr.* = val;
@@ -231,6 +314,57 @@ pub const TypeInterner = struct {
             .boolean => std.debug.print("boolean", .{}),
             .str => std.debug.print("str", .{}),
 
+            .array => |val| {
+                std.debug.print("[", .{});
+                self.printTy(val.base);
+                std.debug.print(": {}]", .{val.size});
+            },
+            .slice => |val| {
+                std.debug.print("[", .{});
+                if (val.mut)
+                    std.debug.print("mut ", .{});
+                self.printTy(val.base);
+                std.debug.print("]", .{});
+            },
+            .optional => |val| {
+                self.printTy(val.base);
+                std.debug.print("?", .{});
+            },
+            .reference => |val| {
+                self.printTy(val.base);
+                if (val.mut)
+                    std.debug.print("mut ", .{});
+                std.debug.print("&", .{});
+            },
+            .record => |rec| {
+                std.debug.print("type", .{});
+                if (rec.backing_field) |field| {
+                    std.debug.print("(", .{});
+                    self.printTy(field);
+                    std.debug.print(")", .{});
+                }
+                self.printTy(rec.fields);
+            },
+            .@"union" => |uni| {
+                std.debug.print("union", .{});
+                if (uni.backing_field) |field| {
+                    std.debug.print("(", .{});
+                    self.printTy(field);
+                    std.debug.print(")", .{});
+                }
+                self.printTy(uni.variants);
+            },
+            .alias => |base| {
+                std.debug.print("type", .{});
+                // if (rec.backing_field) |field| {
+                //     std.debug.print("(", .{});
+                //     self.printTy(field);
+                //     std.debug.print(")", .{});
+                // }
+                std.debug.print(" ", .{});
+                self.printTy(base);
+            },
+            .named => |n| std.debug.print("{}", .{n}),
             .type => |base| {
                 std.debug.print("type(", .{});
                 self.printTy(base);
@@ -250,6 +384,24 @@ pub const TypeInterner = struct {
             },
             .multi_type_impl => |mty| {
                 self.printTy(&.{ .multi_type = self.multi_types.items[mty.start .. mty.start + mty.len] });
+            },
+            .multi_type_keyed => |kyd| {
+                std.debug.print("[", .{});
+                var it = kyd.iterator();
+
+                if (it.next()) |val| {
+                    self.printTy(val.value_ptr.*);
+                    std.debug.print(" {s}", .{val.key_ptr.*});
+                }
+                while (it.next()) |val| {
+                    std.debug.print(", ", .{});
+                    self.printTy(val.value_ptr.*);
+                    std.debug.print(" {s}", .{val.key_ptr.*});
+                }
+                std.debug.print("]", .{});
+            },
+            .multi_type_keyed_impl => |ind| {
+                self.printTy(&.{ .multi_type_keyed = self.multi_types_keyed.items[ind] });
             },
             .func => |func| {
                 self.printTy(func.params);
@@ -360,7 +512,12 @@ pub const TypeChecker = struct {
                     }
                     try self.declared_types.put(node_id, declared_ty.?);
                 } else {
-                    try self.declared_types.put(node_id, ty);
+                    if (ty.* == .record or ty.* == .@"union" or ty.* == .alias) {
+                        const named_ty = self.interner.namedTy(node_id);
+                        try self.declared_types.put(node_id, named_ty);
+                    } else {
+                        try self.declared_types.put(node_id, ty);
+                    }
                 }
 
                 return self.interner.unitTy();
@@ -375,7 +532,13 @@ pub const TypeChecker = struct {
                 if (self.declared_types.get(ref_node)) |ty| break :blk ty;
 
                 std.log.info("Note: Identifier reference hasn't been checked yet. Doing this manually (Is this fine?)'", .{});
-                break :blk try self.typeCheckNode(ref_node);
+                _ = try self.typeCheckNode(ref_node);
+
+                if (self.types.get(ref_node)) |ty| break :blk ty;
+                if (self.declared_types.get(ref_node)) |ty| break :blk ty;
+                std.log.err("Unable to resolve identifier type info!", .{});
+
+                break :blk self.interner.unitTy();
             },
             .int_literal => |_| return self.interner.intLiteralTy(),
             .float_literal => |_| return self.interner.floatLiteralTy(),
@@ -415,6 +578,13 @@ pub const TypeChecker = struct {
                     break :blk1 self.interner.unitTy();
                 };
 
+                {
+                    const block_nodes = self.nodesRange(func.block);
+                    for (block_nodes) |id| {
+                        _ = try self.typeCheckNode(id);
+                    }
+                }
+
                 break :blk self.interner.funcTy(param_tys.items, ret_ty);
             },
             .func_no_params => |func| blk: {
@@ -429,6 +599,13 @@ pub const TypeChecker = struct {
                     std.log.err("Invalid Type", .{});
                     break :blk1 self.interner.unitTy();
                 };
+
+                {
+                    const block_nodes = self.nodesRange(func.block);
+                    for (block_nodes) |id| {
+                        _ = try self.typeCheckNode(id);
+                    }
+                }
 
                 break :blk self.interner.funcTyNoParams(ret_ty);
             },
@@ -546,6 +723,7 @@ pub const TypeChecker = struct {
                 const ty = try self.typeCheckNode(param.ty);
                 const actual_ty = if (ty.* == .type) ty.type else blk1: {
                     std.log.err("Invalid Type", .{});
+                    std.debug.dumpCurrentStackTrace(null);
                     break :blk1 self.interner.unitTy();
                 };
 
@@ -559,13 +737,146 @@ pub const TypeChecker = struct {
                 break :blk actual_ty;
             },
 
-            .array_init_or_slice_one => |expr| {
+            .array_init_or_slice_one => |expr| blk: {
                 const expr_ty = try self.typeCheckNode(expr.expr);
-                if (expr_ty.* == .type) {}
+                const value_expr = if (expr.value) |val|
+                    try self.typeCheckNode(val)
+                else
+                    null;
+
+                if (expr_ty.* == .type) {
+                    const ty = if (value_expr) |_|
+                        self.interner.arrayTy(expr_ty.*.type, 0)
+                    else
+                        self.interner.sliceTy(expr_ty.*.type, expr.mut);
+
+                    break :blk self.interner.typeTy(ty);
+                } else {
+                    break :blk self.interner.arrayTy(expr_ty, 1);
+                }
             },
 
-            .type_int => |size| self.interner.typeTy(self.interner.intTy(size)),
-            .type_uint => |size| self.interner.typeTy(self.interner.uintTy(size)),
+            .array_init => |expr| blk: {
+                const nodes = self.nodesRange(expr.exprs);
+                if (nodes.len < 2) @panic("whoops");
+
+                // @TODO: do something smarter than just picking first element
+                const first_ty = try self.typeCheckNode(nodes[0]);
+                for (nodes[1..], 0..) |id, i| {
+                    const this_ty = try self.typeCheckNode(id);
+                    if (!self.coerceNode(id, this_ty, first_ty)) {
+                        std.log.err("Array initializer values type mismatch (position {})", .{i});
+                    }
+                }
+
+                break :blk self.interner.arrayTy(first_ty, nodes.len);
+            },
+            .type_record => |rec| blk: {
+                const backing_field_ty = if (rec.backing_field) |f|
+                    try self.typeCheckNode(f)
+                else
+                    null;
+                var fields = std.StringHashMap(Type).init(self.arena);
+
+                const field_nodes = self.nodesRange(rec.fields);
+                for (field_nodes) |id| {
+                    const field_node = self.nodes[id.index];
+                    switch (field_node.kind) {
+                        .record_field => |field_val| {
+                            var actual_ty = try self.typeCheckNode(field_val.ty);
+
+                            actual_ty = if (actual_ty.* == .type) actual_ty.type else blk1: {
+                                std.log.err("Invalid Type", .{});
+                                std.debug.dumpCurrentStackTrace(null);
+                                break :blk1 self.interner.unitTy();
+                            };
+
+                            if (field_val.default) |def| {
+                                const default_ty = try self.typeCheckNode(def);
+                                if (!self.coerceNode(def, default_ty, actual_ty)) {
+                                    std.log.err("Field default for '{s}' doesn't match field type!", .{field_val.name});
+                                }
+                            }
+
+                            try fields.put(field_val.name, actual_ty);
+                        },
+                        else => {
+                            _ = try self.typeCheckNode(id);
+                        },
+                    }
+                }
+
+                break :blk self.interner.recordTy(backing_field_ty, fields);
+            },
+            .type_union => |uni| blk: {
+                const backing_field_ty = if (uni.backing_field) |f|
+                    try self.typeCheckNode(f)
+                else
+                    null;
+                var variants = std.StringHashMap(Type).init(self.arena);
+
+                const variant_nodes = self.nodesRange(uni.variants);
+                for (variant_nodes) |id| {
+                    const variant_node = self.nodes[id.index];
+                    switch (variant_node.kind) {
+                        .union_variant => |var_val| {
+                            const name_node = self.nodes[var_val.name.index];
+                            const var_ty = if (var_val.ty.eql(var_val.name) and name_node.kind == .identifier)
+                                self.interner.unitTy()
+                            else blk1: {
+                                const actual_ty = try self.typeCheckNode(var_val.ty);
+
+                                break :blk1 if (actual_ty.* == .type) actual_ty.type else {
+                                    std.log.err("Invalid Type", .{});
+                                    std.debug.dumpCurrentStackTrace(null);
+                                    break :blk1 self.interner.unitTy();
+                                };
+                            };
+
+                            // @TODO: imlement indicies
+
+                            // @TODO: implement type names
+                            const name = if (name_node.kind == .identifier)
+                                name_node.kind.identifier
+                            else
+                                @panic("Unimplemented");
+
+                            try variants.put(name, var_ty);
+                        },
+                        else => {
+                            _ = try self.typeCheckNode(id);
+                        },
+                    }
+                }
+
+                break :blk self.interner.unionTy(backing_field_ty, variants);
+            },
+            .type_ref => |ty| blk: {
+                const base_ty = try self.typeCheckNode(ty.ty);
+                break :blk self.interner.referenceTy(base_ty, ty.mut);
+            },
+            .type_opt => |ty| blk: {
+                const base_ty = try self.typeCheckNode(ty.ty);
+                break :blk self.interner.optionalTy(base_ty);
+            },
+            .type_alias => |id| blk: {
+                const original_ty = try self.typeCheckNode(id);
+                break :blk self.interner.aliasTy(original_ty);
+            },
+            .type_int => |size| blk: {
+                if (size == 0) {
+                    break :blk self.interner.typeTy(self.interner.iptrTy());
+                } else {
+                    break :blk self.interner.typeTy(self.interner.intTy(size));
+                }
+            },
+            .type_uint => |size| blk: {
+                if (size == 0) {
+                    break :blk self.interner.typeTy(self.interner.uptrTy());
+                } else {
+                    break :blk self.interner.typeTy(self.interner.uintTy(size));
+                }
+            },
             .type_float => |size| self.interner.typeTy(self.interner.floatTy(size)),
 
             else => blk: {
