@@ -1,0 +1,15 @@
+ 
+
+let value = const sum()
+
+let MySize = uint?mut &?
+
+let main = (int8 foo = 23) int8 {
+    let foo1 = [foo, a, 1, 2]
+}
+
+let f = main(2)
+
+let Foo = Data
+let Data = type(int) uint A | B
+

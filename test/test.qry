@@ -1,15 +1,9 @@
 
-let foo = 3
-let a = foo
 
-let MySize = uint?mut &?
-
-let main = (int8 foo = 23) int8 {
-    let foo1 = [foo, a, 1, 2]
+let sum = (int8 foo) uint8 {
+    let mut s = 2
+    s += 1
+    8 * (foo + s)
 }
 
-let f = main(2)
-
-let Foo = Data
-let Data = type(int) uint A | B
-
+let a = const sum(2)

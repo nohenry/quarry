@@ -98,7 +98,7 @@ pub const ScopeKind = union(enum) {
     },
     local: struct {
         references: u32,
-        parameter: bool,
+        parameter: ?u32,
     },
 };
 
@@ -180,11 +180,15 @@ pub const Analyzer = struct {
     deferred_nodes: std.ArrayList(DeferredNode),
 
     path_to_node: PathToNodeMap,
+    node_to_path: std.AutoHashMap(node.NodeId, Path),
     node_ref: NodeRefMap,
 
     node_ranges: []const node.NodeId,
     nodes: []const node.Node,
     deferred: bool = false,
+
+    param_index: ?u32 = 0,
+    last_ref: ?node.NodeId = null,
 
     const Self = @This();
 
@@ -205,6 +209,7 @@ pub const Analyzer = struct {
             .deferred_nodes = std.ArrayList(DeferredNode).init(allocator),
             .segment_set = std.StringHashMap(void).init(allocator),
             .path_to_node = PathToNodeMap.init(allocator),
+            .node_to_path = std.AutoHashMap(node.NodeId, Path).init(allocator),
             .current_path = std.ArrayList(PathSegment).init(allocator),
             .node_ref = NodeRefMap.init(allocator),
             .node_ranges = node_ranges,
@@ -259,6 +264,7 @@ pub const Analyzer = struct {
                             },
                         });
                         try self.path_to_node.put(this_scope.path, index);
+                        try self.node_to_path.put(index, this_scope.path);
                     },
                     .type_record,
                     .type_union,
@@ -269,15 +275,17 @@ pub const Analyzer = struct {
                             },
                         });
                         try self.path_to_node.put(this_scope.path, index);
+                        try self.node_to_path.put(index, this_scope.path);
                     },
                     else => {
                         const this_scope = try self.pushScope(try self.segment(value.name), .{
                             .local = .{
                                 .references = 0,
-                                .parameter = false,
+                                .parameter = null,
                             },
                         });
                         try self.path_to_node.put(this_scope.path, index);
+                        try self.node_to_path.put(index, this_scope.path);
                         self.popScope();
                     },
                 }
@@ -303,6 +311,7 @@ pub const Analyzer = struct {
                     scope.incReference();
                     if (self.path_to_node.get(scope.path)) |found_id| {
                         try self.node_ref.put(index, found_id);
+                        self.last_ref = found_id;
                         return;
                     }
                 }
@@ -318,7 +327,6 @@ pub const Analyzer = struct {
                 }
             },
             .parameter => |value| {
-                self.current_scope.print();
                 try self.analyzeNode(value.ty);
                 if (value.spread) {
                     @panic("Unimplemented");
@@ -327,10 +335,11 @@ pub const Analyzer = struct {
                 const this_scope = try self.pushScope(try self.segment(value.name), .{
                     .local = .{
                         .references = 0,
-                        .parameter = true,
+                        .parameter = self.param_index,
                     },
                 });
                 try self.path_to_node.put(this_scope.path, index);
+                try self.node_to_path.put(index, this_scope.path);
                 self.popScope();
 
                 if (value.default) |def| {
@@ -339,9 +348,11 @@ pub const Analyzer = struct {
             },
             .func => |fval| {
                 const param_nodes = self.nodesRange(fval.params);
-                for (param_nodes) |param| {
+                for (param_nodes, 0..) |param, i| {
+                    self.param_index = @truncate(i);
                     try self.analyzeNode(param);
                 }
+                self.param_index = null;
 
                 if (fval.ret_ty) |ret| {
                     try self.analyzeNode(ret);
@@ -370,8 +381,10 @@ pub const Analyzer = struct {
                 // @TODO: imlement key
                 try self.analyzeNode(expr.value);
             },
+            .argument => |expr| try self.analyzeNode(expr),
             .int_literal => |_| {},
             .float_literal => |_| {},
+            .bool_literal => |_| {},
             .string_literal => |_| {},
             .binary_expr => |expr| {
                 try self.analyzeNode(expr.left);
@@ -380,12 +393,70 @@ pub const Analyzer = struct {
             .unary_expr => |expr| {
                 try self.analyzeNode(expr.expr);
             },
-            .invoke => |expr| {
+            .invoke => |expr| blk: {
                 try self.analyzeNode(expr.expr);
+                var doing_named: bool = false;
 
                 const arg_nodes = self.nodesRange(expr.args);
-                for (arg_nodes) |item| {
-                    try self.analyzeNode(item);
+                const func_scope = if (self.last_ref) |ref| blk1: {
+                    const path = self.node_to_path.get(ref) orelse break :blk1 null;
+                    const scope = self.getScopeFromPath(path) orelse break :blk1 null;
+                    break :blk1 scope;
+                } else {
+                    try self.deferred_nodes.append(.{
+                        .path = try self.pathFromCurrent(),
+                        .node = index,
+                    });
+                    break :blk;
+                };
+
+                if (func_scope == null) {
+                    std.log.err("Unable to get function scope!", .{});
+                }
+
+                for (arg_nodes, 0..) |item, i| {
+                    const arg_value = self.nodes[item.index];
+                    switch (arg_value.kind) {
+                        // @TODO: handle .key_value
+                        .key_value_ident => |kv| {
+                            doing_named = true;
+
+                            blk1: {
+                                if (func_scope == null) {} else if (func_scope.?.children.get(kv.key)) |param| {
+                                    if (param.kind == .local and param.kind.local.parameter != null) {
+                                        const param_node_id = self.path_to_node.get(param.path);
+                                        if (param_node_id) |id| {
+                                            try self.node_ref.put(item, id);
+                                            break :blk1;
+                                        }
+                                    }
+                                }
+                                std.log.err("Named argument doesn't exist for function", .{});
+                            }
+
+                            try self.analyzeNode(kv.value);
+                        },
+                        else => {
+                            if (doing_named) {
+                                std.log.err("All positional arguments must be before any named arguments!", .{});
+                            }
+                            if (func_scope) |scp| {
+                                var it = scp.children.iterator();
+                                while (it.next()) |lcl| {
+                                    if (lcl.value_ptr.kind == .local and lcl.value_ptr.kind.local.parameter != null and lcl.value_ptr.kind.local.parameter.? == i) {
+                                        const param_node_id = self.path_to_node.get(lcl.value_ptr.path);
+                                        if (param_node_id) |id| {
+                                            try self.node_ref.put(item, id);
+                                        } else {
+                                            std.log.err("Unable to get parameter node id", .{});
+                                        }
+                                        break;
+                                    }
+                                }
+                                try self.analyzeNode(item);
+                            }
+                        },
+                    }
                 }
 
                 if (expr.trailing_block) |block| {
@@ -437,6 +508,15 @@ pub const Analyzer = struct {
                     for (item_nodes) |item| {
                         try self.analyzeNode(item);
                     }
+                }
+            },
+            .const_expr => |expr| {
+                try self.analyzeNode(expr.expr);
+            },
+            .const_block => |expr| {
+                const item_nodes = self.nodesRange(expr.block);
+                for (item_nodes) |item| {
+                    try self.analyzeNode(item);
                 }
             },
             .array_init_or_slice_one => |val| {
@@ -536,6 +616,19 @@ pub const Analyzer = struct {
                 @panic("Should ahve found path!");
             }
         }
+    }
+
+    fn getScopeFromPath(self: *Self, path: Path) ?*Scope {
+        var current_scope = &self.root_scope;
+        var seg = path.segments[1..];
+        while (seg.len > 0) : (seg = seg[1..]) {
+            if (current_scope.children.getEntry(seg[0])) |val| {
+                current_scope = val.value_ptr;
+            } else {
+                return null;
+            }
+        }
+        return current_scope;
     }
 
     fn lookupIdent(self: *Self, seg: PathSegment) ?*Scope {

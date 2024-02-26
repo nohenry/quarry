@@ -25,6 +25,7 @@ pub const Node = struct {
             .identifier => |value| std.debug.print("  {s}\n", .{value}),
             .int_literal => |value| std.debug.print("  {}\n", .{value}),
             .float_literal => |value| std.debug.print("  {d}\n", .{value}),
+            .bool_literal => |value| std.debug.print("  {}\n", .{value}),
             .string_literal => |value| std.debug.print("  {s}\n", .{value}),
 
             .binding => |cexpr| {
@@ -32,6 +33,7 @@ pub const Node = struct {
                 if (cexpr.ty) |ty| {
                     std.debug.print("  ty: {}-{}\n", .{ ty.file, ty.index });
                 }
+                std.debug.print("  mutable: {}\n", .{cexpr.mutable});
                 std.debug.print("  value: {}-{}\n", .{ cexpr.value.file, cexpr.value.index });
 
                 var it = cexpr.tags.iterator(.{});
@@ -63,6 +65,7 @@ pub const Node = struct {
                 std.debug.print("  key: {s}\n", .{kv.key});
                 std.debug.print("  value: {}\n", .{kv.value});
             },
+            .argument => |arg| std.debug.print("  arg: {}-{}\n", .{ arg.file, arg.index }),
             .parameter => |param| {
                 std.debug.print("  ty: {}-{}\n", .{ param.ty.file, param.ty.index });
                 std.debug.print("  name: {s}\n", .{param.name});
@@ -115,6 +118,12 @@ pub const Node = struct {
                 if (loop.finally_block) |block| {
                     std.debug.print("  finally_block: {}-{}\n", .{ block.start, block.start + block.len });
                 }
+            },
+            .const_expr => |cexpr| {
+                std.debug.print("  expr: {}-{}\n", .{ cexpr.expr.file, cexpr.expr.index });
+            },
+            .const_block => |cexpr| {
+                std.debug.print("  block: {}-{}\n", .{ cexpr.block.start, cexpr.block.start + cexpr.block.len });
             },
             .array_init_or_slice_one => |value| {
                 std.debug.print("  expr: {}-{}\n", .{ value.expr.file, value.expr.index });
@@ -180,10 +189,12 @@ pub const NodeKind = union(enum) {
     identifier: []const u8,
     int_literal: u64,
     float_literal: f64,
+    bool_literal: bool,
     string_literal: []const u8,
 
     binding: struct {
         ty: ?NodeId,
+        mutable: bool,
         name: []const u8,
         tags: SymbolTag.Tag,
         value: NodeId,
@@ -208,6 +219,8 @@ pub const NodeKind = union(enum) {
         key: []const u8,
         value: NodeId,
     },
+
+    argument: NodeId,
 
     parameter: struct {
         ty: NodeId,
@@ -245,6 +258,8 @@ pub const NodeKind = union(enum) {
         else_block: ?NodeRange,
         finally_block: ?NodeRange,
     },
+    const_expr: struct { expr: NodeId },
+    const_block: struct { block: NodeRange },
 
     /// Either an array/record init epxression
     ///  - [1]
@@ -309,6 +324,23 @@ pub const Operator = enum {
     ref,
     opt,
 
+    assign,
+    plus_eq,
+    minus_eq,
+    times_eq,
+    divide_eq,
+    bitand_eq,
+    bitor_eq,
+    bitxor_eq,
+    bitnot_eq,
+
+    equal,
+    not_equal,
+    gt,
+    gte,
+    lt,
+    lte,
+
     pub fn fromTokenKind(kind: tokenize.TokenKind) ?Operator {
         return switch (kind) {
             .plus => .plus,
@@ -327,6 +359,21 @@ pub const Operator = enum {
             .open_paren => .invoke,
             .ampersand, .mut => .ref,
             .question => .opt,
+
+            .assign => .assign,
+            .plus_eq => .plus_eq,
+            .minus_eq => .minus_eq,
+            .star_eq => .times_eq,
+            .slash_eq => .divide_eq,
+            .pipe_eq => .bitor_eq,
+            .carot_eq => .bitxor_eq,
+
+            .equal => .equal,
+            .not_equal => .not_equal,
+            .gt => .gt,
+            .gte => .gte,
+            .lt => .lt,
+            .lte => .lte,
 
             else => null,
         };

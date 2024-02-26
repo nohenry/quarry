@@ -125,14 +125,16 @@ pub const Parser = struct {
     }
 
     pub fn parseBindingWithType(self: *Self, ty_node_id: ?node.NodeId) !node.NodeId {
+        const mutable = self.consumeIfIs(.mut) != null;
         const name = try self.expect(.identifier);
-        _ = try self.expect(.equals);
+        _ = try self.expect(.assign);
         const expr = try self.parseExpr();
 
         return self.createNode(.{
             .binding = .{
                 .name = name,
                 .ty = ty_node_id,
+                .mutable = mutable,
                 .tags = node.SymbolTag.Tag.initEmpty(),
                 .value = expr,
             },
@@ -176,12 +178,12 @@ pub const Parser = struct {
                     // parseInvoke
                     _ = self.next();
                     const first = if (!self.nextIs(.close_paren))
-                        try self.parseKvOrExpr()
+                        try self.parseArgument()
                     else
                         null;
 
                     const args = if (first) |expr|
-                        try self.parseCommaSimpleFirst(expr, .close_paren, parseKvOrExpr)
+                        try self.parseCommaSimpleFirst(expr, .close_paren, parseArgument)
                     else
                         node.NodeRange{
                             .start = @truncate(self.node_ranges.items.len),
@@ -284,7 +286,7 @@ pub const Parser = struct {
                 }
 
                 const first_ty = try self.parseBinExpr(81);
-                if (self.nextIs(.pipe) or self.nextIs(.identifier) or self.nextIs(.equals)) {
+                if (self.nextIs(.pipe) or self.nextIs(.identifier) or self.nextIs(.assign)) {
                     // parseUnion
 
                     const variant = try self.parseUnionVariantFirstExpr(first_ty);
@@ -336,7 +338,6 @@ pub const Parser = struct {
 
                     return self.parseFuncWithParams(params);
                 } else if (expr == null) {
-                    try self.expect(.close_paren);
                     return self.parseFuncWithParams(null);
                 }
 
@@ -508,6 +509,20 @@ pub const Parser = struct {
                     },
                 });
             },
+            .@"const" => {
+                _ = self.next();
+                if (self.nextIs(.open_brace)) {
+                    const block = try self.parseBraceBlock();
+                    return self.createNode(.{
+                        .const_block = .{ .block = block },
+                    });
+                } else {
+                    const expr = try self.parseExpr();
+                    return self.createNode(.{
+                        .const_expr = .{ .expr = expr },
+                    });
+                }
+            },
             else => return self.parseLiteral(),
         }
     }
@@ -550,7 +565,7 @@ pub const Parser = struct {
         const ty = try self.parseExpr();
         const name = try self.expect(.identifier);
 
-        const default = if (self.consumeIfIs(.equals) != null)
+        const default = if (self.consumeIfIs(.assign) != null)
             try self.parseExpr()
         else
             null;
@@ -570,12 +585,12 @@ pub const Parser = struct {
     }
 
     pub fn parseUnionVariantFirstExpr(self: *Self, first: node.NodeId) !node.NodeId {
-        const name = if (self.nextIsNoNL(.newline) or !self.hasNext() or self.nextIs(.pipe) or self.nextIs(.equals))
+        const name = if (self.nextIsNoNL(.newline) or !self.hasNext() or self.nextIs(.pipe) or self.nextIs(.assign))
             first
         else
             try self.parseLiteral();
 
-        const index = if (self.consumeIfIs(.equals) != null)
+        const index = if (self.consumeIfIs(.assign) != null)
             try self.parseBinExpr(81)
         else
             null;
@@ -595,6 +610,7 @@ pub const Parser = struct {
         return switch (tok.kind) {
             .int_literal => |value| self.createNodeAndNext(.{ .int_literal = value }),
             .float_literal => |value| self.createNodeAndNext(.{ .float_literal = value }),
+            .bool_literal => |value| self.createNodeAndNext(.{ .bool_literal = value }),
             .string_literal => |value| self.createNodeAndNext(.{ .string_literal = value }),
             .identifier => |value| self.createNodeAndNext(.{ .identifier = value }),
 
@@ -628,6 +644,14 @@ pub const Parser = struct {
             }),
             else => error.UnexpectedToken,
         };
+    }
+
+    pub fn parseArgument(self: *Self) !node.NodeId {
+        const val = try self.parseKvOrExpr();
+        if (self.nodes.items[val.index].kind != .key_value and self.nodes.items[val.index].kind != .key_value_ident) {
+            return self.createNode(.{ .argument = val });
+        }
+        return val;
     }
 
     pub fn parseKvOrExpr(self: *Self) !node.NodeId {
@@ -665,7 +689,7 @@ pub const Parser = struct {
     pub fn parseParameterWithFirstType(self: *Self, ty: node.NodeId) !node.NodeId {
         const spread = self.consumeIfIs(.spread) != null;
         const ident = try self.expect(.identifier);
-        const default = if (self.consumeIfIs(.equals) != null)
+        const default = if (self.consumeIfIs(.assign) != null)
             try self.parseExpr()
         else
             null;
@@ -819,6 +843,22 @@ fn binaryPrec(op: node.Operator) u8 {
         .bitxor => 45,
 
         .shiftleft, .shiftright => 40,
+
+        .assign => 20,
+        .plus_eq => 20,
+        .minus_eq => 20,
+        .times_eq => 20,
+        .divide_eq => 20,
+        .bitor_eq => 20,
+        .bitxor_eq => 20,
+
+        .equal => 30,
+        .not_equal => 30,
+        .gt => 30,
+        .gte => 30,
+        .lt => 30,
+        .lte => 30,
+
         else => 0,
     };
 }

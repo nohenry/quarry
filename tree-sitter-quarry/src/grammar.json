@@ -59,6 +59,18 @@
           "value": "let"
         },
         {
+          "type": "CHOICE",
+          "members": [
+            {
+              "type": "STRING",
+              "value": "mut"
+            },
+            {
+              "type": "BLANK"
+            }
+          ]
+        },
+        {
           "type": "FIELD",
           "name": "name",
           "content": {
@@ -106,6 +118,36 @@
         {
           "type": "SYMBOL",
           "name": "call_expression"
+        },
+        {
+          "type": "SYMBOL",
+          "name": "const_expr"
+        }
+      ]
+    },
+    "const_expr": {
+      "type": "SEQ",
+      "members": [
+        {
+          "type": "STRING",
+          "value": "const"
+        },
+        {
+          "type": "SYMBOL",
+          "name": "expression"
+        }
+      ]
+    },
+    "const_block": {
+      "type": "SEQ",
+      "members": [
+        {
+          "type": "STRING",
+          "value": "const"
+        },
+        {
+          "type": "SYMBOL",
+          "name": "if_block"
         }
       ]
     },
@@ -1106,18 +1148,6 @@
                       "type": "CHOICE",
                       "members": [
                         {
-                          "type": "STRING",
-                          "value": "const"
-                        },
-                        {
-                          "type": "BLANK"
-                        }
-                      ]
-                    },
-                    {
-                      "type": "CHOICE",
-                      "members": [
-                        {
                           "type": "SYMBOL",
                           "name": "type"
                         },
@@ -1170,18 +1200,6 @@
                       {
                         "type": "SEQ",
                         "members": [
-                          {
-                            "type": "CHOICE",
-                            "members": [
-                              {
-                                "type": "STRING",
-                                "value": "const"
-                              },
-                              {
-                                "type": "BLANK"
-                              }
-                            ]
-                          },
                           {
                             "type": "CHOICE",
                             "members": [
@@ -1997,6 +2015,10 @@
       {
         "type": "SYMBOL",
         "name": "closure"
+      },
+      {
+        "type": "SYMBOL",
+        "name": "const_expr"
       }
     ],
     [

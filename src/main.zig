@@ -3,6 +3,7 @@ const tokenize = @import("tokenize.zig");
 const parser = @import("parser.zig");
 const analyze = @import("analyze.zig");
 const type_check = @import("typecheck.zig");
+const eval = @import("eval.zig");
 
 pub const std_options = .{
     .logFn = myLogFn,
@@ -81,7 +82,34 @@ pub fn main() !void {
         arena.allocator(),
     );
 
-    try tycheck.typeCheck(ids);
+    const type_info = try tycheck.typeCheck(ids);
+
+    var evaluator = eval.Evaluator.init(
+        prsr.nodes.items,
+        prsr.node_ranges.items,
+        anal.node_ref,
+        type_info,
+        alloc.allocator(),
+        arena.allocator(),
+    );
+    const instrs = try evaluator.eval(ids);
+
+    std.debug.print("File items: \n", .{});
+    for (instrs) |nodeId| {
+        const instr = evaluator.instructions.items[@as(usize, nodeId.index)];
+        instr.print();
+    }
+
+    std.debug.print("\nInstruction Ranges: \n", .{});
+    for (evaluator.instruction_ranges.items) |nodeId| {
+        const instr = evaluator.instructions.items[@as(usize, nodeId.index)];
+        instr.print();
+    }
+
+    std.debug.print("\nAll instructions: \n", .{});
+    for (evaluator.instructions.items) |instr| {
+        instr.print();
+    }
 
     arena.deinit();
 

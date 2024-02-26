@@ -98,6 +98,11 @@ pub const TypeMap = std.HashMap(
 
 pub const Type = *const BaseType;
 
+pub const TypeInfo = struct {
+    types: std.AutoHashMap(node.NodeId, Type),
+    declared_types: std.AutoHashMap(node.NodeId, Type),
+};
+
 pub const TypeInterner = struct {
     allocator: std.mem.Allocator,
     types: TypeMap,
@@ -375,10 +380,11 @@ pub const TypeInterner = struct {
                 std.debug.print("(", .{});
                 if (tys.len > 0) {
                     self.printTy(tys[0]);
-                }
-                for (tys[1..]) |mty| {
-                    std.debug.print(",", .{});
-                    self.printTy(mty);
+
+                    for (tys[1..]) |mty| {
+                        std.debug.print(",", .{});
+                        self.printTy(mty);
+                    }
                 }
                 std.debug.print(")", .{});
             },
@@ -458,7 +464,7 @@ pub const TypeChecker = struct {
         };
     }
 
-    pub fn typeCheck(self: *Self, nodes: []const node.NodeId) !void {
+    pub fn typeCheck(self: *Self, nodes: []const node.NodeId) !TypeInfo {
         std.log.info("Start Typeechking", .{});
         for (nodes) |id| {
             _ = try self.typeCheckNode(id);
@@ -484,6 +490,11 @@ pub const TypeChecker = struct {
                 std.debug.print("\n", .{});
             }
         }
+
+        return .{
+            .types = self.types,
+            .declared_types = self.declared_types,
+        };
     }
 
     pub fn typeCheckNode(self: *Self, node_id: node.NodeId) !Type {
@@ -542,21 +553,43 @@ pub const TypeChecker = struct {
             },
             .int_literal => |_| return self.interner.intLiteralTy(),
             .float_literal => |_| return self.interner.floatLiteralTy(),
+            .bool_literal => |_| return self.interner.boolTy(),
             .string_literal => |_| return self.interner.strTy(),
             .binary_expr => |expr| blk: {
                 const left_ty = try self.typeCheckNode(expr.left);
                 const right_ty = try self.typeCheckNode(expr.right);
 
-                if (left_ty != right_ty) {
+                if (canCoerce(left_ty, right_ty)) {
+                    std.debug.assert(self.coerceNode(expr.left, left_ty, right_ty));
+                } else if (canCoerce(right_ty, left_ty)) {
+                    std.debug.assert(self.coerceNode(expr.right, right_ty, left_ty));
+                } else if (left_ty != right_ty) {
                     std.log.err("Type mismatch!!! {}", .{node_id});
                 }
 
-                break :blk left_ty;
+                break :blk switch (expr.op) {
+                    .plus_eq,
+                    .minus_eq,
+                    .times_eq,
+                    .divide_eq,
+                    .bitor_eq,
+                    .bitxor_eq,
+                    => self.interner.unitTy(),
+                    .equal,
+                    .not_equal,
+                    .gt,
+                    .gte,
+                    .lt,
+                    .lte,
+                    => self.interner.boolTy(),
+                    else => left_ty,
+                };
             },
             .unary_expr => |expr| blk: {
                 const expr_ty = try self.typeCheckNode(expr.expr);
                 break :blk expr_ty;
             },
+            .argument => |expr| try self.typeCheckNode(expr),
             .func => |func| blk: {
                 var param_tys = std.ArrayList(Type).init(self.arena);
                 const nodes = self.nodesRange(func.params);

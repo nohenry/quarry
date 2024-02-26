@@ -10,15 +10,30 @@ pub const Token = struct {
 pub const TokenKind = union(enum) {
     int_literal: u64,
     float_literal: f64,
+    bool_literal: bool,
     string_literal: []const u8,
     identifier: []const u8,
 
     newline,
     comma,
     colon,
-    equals,
+    assign,
     arrow,
     spread,
+
+    equal,
+    not_equal,
+    gt,
+    gte,
+    lt,
+    lte,
+
+    plus_eq,
+    minus_eq,
+    star_eq,
+    slash_eq,
+    pipe_eq,
+    carot_eq,
 
     plus,
     minus,
@@ -52,6 +67,7 @@ pub const TokenKind = union(enum) {
     @"else",
     finally,
     loop,
+    @"const",
     mut,
     type,
     protocol,
@@ -90,6 +106,13 @@ pub const Lexer = struct {
         }
     }
 
+    inline fn binAndAssign(self: *const Self, bin: TokenKind, assign: TokenKind, len: usize) struct { TokenKind, usize } {
+        return if (self.source.len > (self.position + 1) and self.source[self.position + 1] == '=')
+            .{ assign, len + 1 }
+        else
+            .{ bin, len };
+    }
+
     pub fn next(self: *Self) ?Token {
         if (self.peek_buff) |pk| {
             self.peek_buff = null;
@@ -113,20 +136,21 @@ pub const Lexer = struct {
             '=' => if (self.source.len > (self.position + 1))
                 switch (self.source[self.position + 1]) {
                     '>' => .{ .arrow, 2 },
-                    else => .{ .equals, 1 },
+                    '=' => .{ .equal, 2 },
+                    else => .{ .assign, 1 },
                 }
             else
-                .{ .equals, 1 },
+                .{ .assign, 1 },
 
-            '+' => .{ .plus, 1 },
-            '-' => .{ .minus, 1 },
-            '*' => .{ .star, 1 },
+            '+' => self.binAndAssign(.plus, .plus_eq, 1),
+            '-' => self.binAndAssign(.minus, .minus_eq, 1),
+            '*' => self.binAndAssign(.star, .star_eq, 1),
             '&' => .{ .ampersand, 1 },
-            '|' => .{ .pipe, 1 },
-            '^' => .{ .carot, 1 },
+            '|' => self.binAndAssign(.pipe, .pipe_eq, 1),
+            '^' => self.binAndAssign(.carot, .carot_eq, 1),
             '~' => .{ .tilde, 1 },
             '?' => .{ .question, 1 },
-            '!' => .{ .bang, 1 },
+            '!' => self.binAndAssign(.bang, .not_equal, 1),
             '.' => if (self.source.len > (self.position + 1))
                 switch (self.source[self.position + 1]) {
                     '?' => .{ .dot_question, 2 },
@@ -136,7 +160,7 @@ pub const Lexer = struct {
                     '.' => if (self.source.len > (self.position + 3) and self.source[self.position + 2] == '.' and self.source[self.position + 3] == '.')
                         .{ .spread, 3 }
                     else
-                        std.debug.panic("Unexpected token {} found in input!", .{c}),
+                        std.debug.panic("Unexpected token {c} found in input!", .{c}),
                     else => .{ .dot, 1 },
                 }
             else
@@ -144,12 +168,11 @@ pub const Lexer = struct {
             '>' => if (self.source.len > (self.position + 1) and self.source[self.position + 1] == '>')
                 .{ .double_right, 2 }
             else
-                std.debug.panic("Unexpected token {} found in input!", .{c}),
+                self.binAndAssign(.gt, .gte, 1),
             '<' => if (self.source.len > (self.position + 1) and self.source[self.position + 1] == '<')
                 .{ .double_left, 2 }
             else
-                std.debug.panic("Unexpected token {} found in input!", .{c}),
-
+                self.binAndAssign(.lt, .lte, 1),
             '(' => .{ .open_paren, 1 },
             ')' => .{ .close_paren, 1 },
             '[' => .{ .open_bracket, 1 },
@@ -175,17 +198,17 @@ pub const Lexer = struct {
                 };
             },
             '/' => blk: {
-                if (self.source[self.position + 1] == '/') {
+                if (self.source.len > (self.position + 1) and self.source[self.position + 1] == '/') {
                     while (self.position < self.source.len and self.source[self.position] != '\n') : (self.position += 1) {}
                     self.position += 1;
-                } else if (self.source[self.position + 1] == '*') {
+                } else if (self.source.len > (self.position + 1) and self.source[self.position + 1] == '*') {
                     while (self.position + 1 < self.source.len and self.source[self.position] != '*' and self.source[self.position + 1] != '/') : (self.position += 1) {}
                     self.position += 1;
                 } else {
-                    break :blk .{ .slash, 1 };
+                    break :blk self.binAndAssign(.slash, .slash_eq, 1);
                 }
 
-                std.debug.panic("Unexpected token {} found in input!", .{c});
+                std.debug.panic("Unexpected token {c} found in input!", .{c});
             },
             else => blk: {
                 if (isValidIdentifier(c, true)) {
@@ -230,7 +253,7 @@ pub const Lexer = struct {
                         break :blk .{ .{ .int_literal = i }, 0 };
                     }
                 }
-                std.debug.panic("Unexpected token {} found in input!", .{c});
+                std.debug.panic("Unexpected token {c} found in input!", .{c});
             },
         };
 
@@ -260,6 +283,9 @@ pub const keyword_map = std.ComptimeStringMap(TokenKind, [_]KV{
     .{ "else", .@"else" },
     .{ "loop", .loop },
     .{ "finally", .finally },
+    .{ "const", .@"const" },
+    .{ "true", .{ .bool_literal = true } },
+    .{ "false", .{ .bool_literal = false } },
     .{ "uint", .{ .uint = 0 } },
     .{ "uint8", .{ .uint = 8 } },
     .{ "uint16", .{ .uint = 16 } },

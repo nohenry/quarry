@@ -45,6 +45,7 @@ module.exports = grammar({
             "binary_equality",
             "binary_pipe",
             $.closure,
+            $.const_expr,
         ],
         [
             $.type_record,
@@ -74,6 +75,7 @@ module.exports = grammar({
         binding: ($) =>
             seq(
                 "let",
+                optional("mut"),
                 field("name", $.identifier),
                 "=",
                 field("value", $.type)
@@ -88,7 +90,10 @@ module.exports = grammar({
                 $.if_expr,
                 $.loop_expr,
                 $.call_expression,
+                $.const_expr,
             ),
+        const_expr: $ => seq('const', $.expression),
+        const_block: $ => seq('const', $.if_block),
 
         type: ($) =>
             choice(
@@ -204,7 +209,7 @@ module.exports = grammar({
                 "(",
                 commaSep(
                     seq(
-                        optional("const"),
+                        // optional("const"),
                         choice($.type, "let"),
                         $.identifier,
                         optional(field('default', seq('=', $.type)))
