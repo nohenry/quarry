@@ -1,9 +1,10 @@
 
 
-let sum = (int8 foo) uint8 {
+let sum = (int8 foo, int8 bar) uint8 {
     let mut s = 2
     s += 1
-    8 * (foo + s)
+
+    bar * (foo + s)
 }
 
-let a = const sum(2)
+let a = const sum(2, bar: 8)

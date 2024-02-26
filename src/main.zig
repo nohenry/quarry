@@ -47,7 +47,7 @@ pub fn main() !void {
 
     const file_contents = try in_stream.readAllAlloc(alloc.allocator(), std.math.maxInt(usize));
 
-    var lexer = tokenize.Lexer.init(file_contents);
+    var lexer = tokenize.Lexer.init(file_contents, alloc.allocator());
     var prsr = parser.Parser.init(alloc.allocator(), &lexer);
     const ids = try prsr.parse();
 

@@ -107,7 +107,11 @@ pub const Parser = struct {
             else => blk: {
                 const expr = try self.parseExpr();
 
-                break :blk if (self.nextIs(.identifier))
+                if (self.nextIsNoNL(.identifier)) {
+                    self.lexer.resync();
+                }
+
+                break :blk if (self.nextIsNoNL(.identifier))
                     self.parseBindingWithType(expr)
                 else
                     expr;
@@ -753,13 +757,12 @@ pub const Parser = struct {
     }
 
     inline fn nextIs(self: *Self, comptime kind: std.meta.FieldEnum(tokenize.TokenKind)) bool {
-        self.consumeNL();
         const tok = self.peek() orelse return false;
         return tok.kind == kind;
     }
 
     inline fn nextIsNoNL(self: *Self, comptime kind: std.meta.FieldEnum(tokenize.TokenKind)) bool {
-        const tok = self.peek() orelse return false;
+        const tok = self.peekNoNL() orelse return false;
         return tok.kind == kind;
     }
 

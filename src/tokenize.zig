@@ -78,17 +78,24 @@ pub const TokenKind = union(enum) {
     @"extern",
 };
 
+pub const SourceInfo = struct {
+    position: usize,
+};
+
 pub const Lexer = struct {
     source: []const u8,
     position: usize = 0,
     index: usize = 0,
 
+    source_info: std.ArrayList(SourceInfo),
+
     peek_buff: ?Token = null,
 
     const Self = @This();
 
-    pub fn init(source: []const u8) Self {
+    pub fn init(source: []const u8, allocator: std.mem.Allocator) Self {
         return .{
+            .source_info = std.ArrayList(SourceInfo).init(allocator),
             .source = source,
         };
     }
@@ -113,6 +120,15 @@ pub const Lexer = struct {
             .{ bin, len };
     }
 
+    pub fn resync(self: *Self) void {
+        if (self.peek_buff != null) {
+            self.peek_buff  = null;
+            self.position = self.source_info.items[self.source_info.items.len - 2].position;
+        } else {
+            self.position = self.source_info.getLast().position;
+        }
+    }
+
     pub fn next(self: *Self) ?Token {
         if (self.peek_buff) |pk| {
             self.peek_buff = null;
@@ -128,6 +144,7 @@ pub const Lexer = struct {
         }
 
         const c = self.source[self.position];
+        const old_position = self.position;
 
         const result: struct { TokenKind, usize } = switch (c) {
             '\n' => .{ .newline, 1 },
@@ -256,6 +273,10 @@ pub const Lexer = struct {
                 std.debug.panic("Unexpected token {c} found in input!", .{c});
             },
         };
+
+        self.source_info.append(.{
+            .position = old_position,
+        }) catch @panic("Memory error");
 
         self.position += result[1];
 

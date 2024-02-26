@@ -559,6 +559,9 @@ pub const Evaluator = struct {
                 // @TODO: return value here
                 break :blk null;
             },
+            // @TODO: Maybe do something with key here?
+            .key_value => |kv| try self.evalNode(kv.value),
+            .key_value_ident => |kv| try self.evalNode(kv.value),
             .argument => |expr| try self.evalNode(expr),
             .invoke => |inv| blk: {
                 const saved = self.save();
@@ -579,7 +582,7 @@ pub const Evaluator = struct {
                                 for (args) |arg| {
                                     const arg_instr = try self.evalNode(arg) orelse @panic("Invalid argument");
                                     const ref_node = self.node_refs.getEntry(arg) orelse {
-                                        std.log.err("Unable to get node ref entry for argument!", .{});
+                                        std.log.err("Unable to get node ref entry for argument! {}", .{arg});
                                         continue;
                                     };
 

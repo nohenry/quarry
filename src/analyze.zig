@@ -422,7 +422,8 @@ pub const Analyzer = struct {
                             doing_named = true;
 
                             blk1: {
-                                if (func_scope == null) {} else if (func_scope.?.children.get(kv.key)) |param| {
+                                const key = try self.segment(kv.key);
+                                if (func_scope == null) {} else if (func_scope.?.children.get(key)) |param| {
                                     if (param.kind == .local and param.kind.local.parameter != null) {
                                         const param_node_id = self.path_to_node.get(param.path);
                                         if (param_node_id) |id| {
