@@ -94,6 +94,22 @@ pub const Instruction = struct {
                     std.debug.print("  false_block: {}-{}\n", .{ blk.start, blk.start + blk.len });
                 }
             },
+
+            .loop => |loop| {
+                if (loop.expr) |expr| {
+                    std.debug.print("  expr: {}-{}\n", .{ expr.file, expr.index });
+                }
+                // if (loop.captures) |capt| {
+                //     std.debug.print("  captures: {}-{}\n", .{ capt.start, capt.start + capt.len });
+                // }
+                std.debug.print("  loop_block: {}-{}\n", .{ loop.loop_block.start, loop.loop_block.start + loop.loop_block.len });
+                if (loop.else_block) |block| {
+                    std.debug.print("  else_block: {}-{}\n", .{ block.start, block.start + block.len });
+                }
+                if (loop.finally_block) |block| {
+                    std.debug.print("  finally_block: {}-{}\n", .{ block.start, block.start + block.len });
+                }
+            },
         }
     }
 };
@@ -133,6 +149,14 @@ pub const InstructionKind = union(enum) {
         // captures: ?NodeRange,
         true_block: InstructionRange,
         false_block: ?InstructionRange,
+    },
+
+    loop: struct {
+        expr: ?InstructionId,
+        // captures: ?NodeRange,
+        loop_block: InstructionRange,
+        else_block: ?InstructionRange,
+        finally_block: ?InstructionRange,
     },
 };
 
@@ -474,6 +498,78 @@ pub const Evaluator = struct {
                         .cond = cond_id,
                         .true_block = true_block,
                         .false_block = false_block,
+                    },
+                });
+            },
+            .loop => |expr| blk: {
+                const save_point = self.save();
+
+                if (self.eval_const) {
+                    const item_nodes = self.nodesRange(expr.loop_block);
+                    var once = false;
+                    if (expr.expr != null) {
+                        while (true) {
+                            self.reset(save_point);
+                            const cond_id = try self.evalNode(expr.expr.?) orelse @panic("invalid condition");
+
+                            if (self.getConst(cond_id)) |cond_val| {
+                                switch (cond_val.kind) {
+                                    .bool => |bvalue| {
+                                        if (!bvalue) break;
+                                    },
+                                    else => std.debug.panic("Expected boolean expresion in if condition! {}", .{cond_val}),
+                                }
+                            }
+
+                            once = true;
+
+                            for (item_nodes) |item| {
+                                _ = try self.evalNode(item);
+                            }
+                        }
+
+                        if (!once and expr.else_block != null) {
+                            const else_item_nodes = self.nodesRange(expr.else_block.?);
+                            for (else_item_nodes) |item| {
+                                _ = try self.evalNode(item);
+                            }
+                        }
+
+                        // @TODO: check breaks before executing this
+                        if (once and expr.finally_block != null) {
+                            const finally_item_nodes = self.nodesRange(expr.finally_block.?);
+                            for (finally_item_nodes) |item| {
+                                _ = try self.evalNode(item);
+                            }
+                        }
+
+                        break :blk try self.createConst(.undef);
+                    } else {
+                        while (true) {
+                            for (item_nodes) |item| {
+                                _ = try self.evalNode(item);
+                            }
+                        }
+
+                        break :blk try self.createConst(.undef);
+                    }
+                }
+
+                const cond_id = if (expr.expr) |cond|
+                    try self.evalNode(cond) orelse @panic("invalid condition")
+                else
+                    null;
+
+                const loop_block = try self.evalRange(expr.loop_block);
+                const else_block = if (expr.else_block) |block| try self.evalRange(block) else null;
+                const finally_block = if (expr.finally_block) |block| try self.evalRange(block) else null;
+
+                break :blk try self.createInstruction(.{
+                    .loop = .{
+                        .expr = cond_id,
+                        .loop_block = loop_block,
+                        .else_block = else_block,
+                        .finally_block = finally_block,
                     },
                 });
             },

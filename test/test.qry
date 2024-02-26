@@ -1,10 +1,14 @@
 
 
 let sum = (int8 foo, int8 bar) uint8 {
-    let mut s = 2
-    s += 1
+    let mut i = bar
+    let mut s = 0
+    loop i > 0 { 
+        i -= 1 
+        s += i
+    }
 
     bar * (foo + s)
 }
 
-let a = const sum(2, bar: 8)
+let a = const sum(2, bar: 10)
