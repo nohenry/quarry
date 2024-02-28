@@ -1,6 +1,7 @@
 const std = @import("std");
 const node = @import("node.zig");
 const analyze = @import("analyze.zig");
+const eval = @import("eval.zig");
 
 pub const BaseType = union(enum) {
     unit: void,
@@ -441,14 +442,23 @@ pub const TypeChecker = struct {
 
     nodes: []const node.Node,
     node_ranges: []const node.NodeId,
-    node_refs: analyze.NodeRefMap,
+    analyzer: *const analyze.Analyzer,
 
     types: std.AutoHashMap(node.NodeId, Type),
     declared_types: std.AutoHashMap(node.NodeId, Type),
 
+    evaluator: *eval.Evaluator = undefined,
+    greedy_symbols: bool = false,
+
     const Self = @This();
 
-    pub fn init(nodes: []const node.Node, node_ranges: []const node.NodeId, node_refs: analyze.NodeRefMap, allocator: std.mem.Allocator, arena: std.mem.Allocator) !Self {
+    pub fn init(
+        nodes: []const node.Node,
+        node_ranges: []const node.NodeId,
+        analyzer: *const analyze.Analyzer,
+        allocator: std.mem.Allocator,
+        arena: std.mem.Allocator,
+    ) !Self {
         const interner = try allocator.create(TypeInterner);
         interner.* = TypeInterner.init(allocator);
         try interner.setup();
@@ -458,10 +468,14 @@ pub const TypeChecker = struct {
             .interner = interner,
             .nodes = nodes,
             .node_ranges = node_ranges,
-            .node_refs = node_refs,
+            .analyzer = analyzer,
             .types = std.AutoHashMap(node.NodeId, Type).init(allocator),
             .declared_types = std.AutoHashMap(node.NodeId, Type).init(allocator),
         };
+    }
+
+    pub fn setup(self: *Self, evaluator: *eval.Evaluator) void {
+        self.evaluator = evaluator;
     }
 
     pub fn typeCheck(self: *Self, nodes: []const node.NodeId) !TypeInfo {
@@ -519,7 +533,9 @@ pub const TypeChecker = struct {
 
                 if (declared_ty != null) {
                     if (!self.coerceNode(value.value, ty, declared_ty.?)) {
-                        std.log.err("Type of initial value does not match variable type!", .{});
+                        std.log.err("Type of initial value does not match variable type! Types: ", .{});
+                        self.interner.printTy(ty);
+                        self.interner.printTy(declared_ty.?);
                     }
                     try self.declared_types.put(node_id, declared_ty.?);
                 } else {
@@ -535,7 +551,7 @@ pub const TypeChecker = struct {
             },
 
             .identifier => blk: {
-                const ref_node = self.node_refs.get(node_id) orelse {
+                const ref_node = self.analyzer.node_ref.get(node_id) orelse {
                     std.log.err("Node ref didn't exist!", .{});
                     break :blk self.interner.unitTy();
                 };
@@ -590,6 +606,8 @@ pub const TypeChecker = struct {
                 break :blk expr_ty;
             },
             .argument => |expr| try self.typeCheckNode(expr),
+            .key_value_ident => |kv| try self.typeCheckNode(kv.value),
+            .key_value => |kv| try self.typeCheckNode(kv.value),
             .func => |func| blk: {
                 var param_tys = std.ArrayList(Type).init(self.arena);
                 const nodes = self.nodesRange(func.params);
@@ -613,8 +631,17 @@ pub const TypeChecker = struct {
 
                 {
                     const block_nodes = self.nodesRange(func.block);
-                    for (block_nodes) |id| {
-                        _ = try self.typeCheckNode(id);
+                    if (block_nodes.len > 0) {
+                        for (block_nodes[0 .. block_nodes.len - 1]) |id| {
+                            _ = try self.typeCheckNode(id);
+                        }
+
+                        const last_ty = try self.typeCheckNode(block_nodes[block_nodes.len - 1]);
+                        if (last_ty != self.interner.unitTy() and ret_ty != null) {
+                            if (!self.coerceNode(block_nodes[block_nodes.len - 1], last_ty, ret_ty.?)) {
+                                std.log.err("Return value does not match function return type!", .{});
+                            }
+                        }
                     }
                 }
 
@@ -635,8 +662,17 @@ pub const TypeChecker = struct {
 
                 {
                     const block_nodes = self.nodesRange(func.block);
-                    for (block_nodes) |id| {
-                        _ = try self.typeCheckNode(id);
+                    if (block_nodes.len > 0) {
+                        for (block_nodes[0 .. block_nodes.len - 1]) |id| {
+                            _ = try self.typeCheckNode(id);
+                        }
+
+                        const last_ty = try self.typeCheckNode(block_nodes[block_nodes.len - 1]);
+                        if (last_ty != self.interner.unitTy() and ret_ty != null) {
+                            if (!self.coerceNode(block_nodes[block_nodes.len - 1], last_ty, ret_ty.?)) {
+                                std.log.err("Return value does not match function return type!", .{});
+                            }
+                        }
                     }
                 }
 
@@ -649,22 +685,60 @@ pub const TypeChecker = struct {
                     break :blk self.interner.unitTy();
                 }
 
-                const expected_types = self.interner.getMultiTypes(call_ty.func.params);
+                // keep track of typechecked arguments. used for default args
+                var unchecked_args = std.bit_set.IntegerBitSet(256).initEmpty();
 
-                if (expr.args.len != expected_types.len) {
-                    std.log.err("Expected {} arguments but got {}", .{ expected_types.len, expr.args.len });
-                }
+                const ref_node_id = self.analyzer.node_ref.get(node_id) orelse @panic("uanble to get node ref");
+                const bind_func_node = &self.nodes[ref_node_id.index].kind.binding;
+                const func_node = &self.nodes[bind_func_node.value.index];
+                const func_scope = blk1: {
+                    const path = self.analyzer.node_to_path.get(ref_node_id) orelse @panic("unable to get node path");
+                    const scope = self.analyzer.getScopeFromPath(path) orelse @panic("unable to get scope form apth");
+                    break :blk1 scope;
+                };
+
+                const expected_types = self.interner.getMultiTypes(call_ty.func.params);
+                unchecked_args.setRangeValue(.{ .start = 0, .end = expected_types.len }, true);
 
                 const arg_nodes = self.nodesRange(expr.args);
 
                 const len = @min(expected_types.len, arg_nodes.len);
 
                 // @TODO: check trailing block arg
-                for (arg_nodes[0..len], expected_types[0..len], 0..) |arg_id, exp_ty, i| {
+                for (arg_nodes[0..len], 0..) |arg_id, i| {
+                    // For the args passed in, we get the actual parameter index and compare the type
+                    // of the arg with the type of the function's paramater at that index.
+                    const param_node_id = self.analyzer.node_ref.get(arg_id) orelse @panic("unable to get node ref");
+                    const param_node = &self.nodes[param_node_id.index];
+                    const param = &param_node.kind.parameter;
+
+                    const param_name = try self.analyzer.getSegment(param.name) orelse @panic("Unable to get param segment");
+                    const param_scope = func_scope.children.get(param_name) orelse @panic("Couldn't get parameter in function");
+                    const param_index = param_scope.kind.local.parameter.?;
+
                     const arg_ty = try self.typeCheckNode(arg_id);
+
+                    const exp_ty = expected_types[param_index];
+                    unchecked_args.unset(param_index);
 
                     if (!self.coerceNode(arg_id, arg_ty, exp_ty)) {
                         std.log.err("Function argument mismatch! For arg {}.", .{i}); // @TODO: print the types
+                    }
+                }
+
+                if (func_node.kind == .func) {
+                    const param_nodes = self.nodesRange(func_node.kind.func.params);
+                    for (0..expected_types.len) |i| {
+                        // check if remaining args have a default. error if they dont
+                        if (unchecked_args.isSet(i)) {
+                            const param_node_id = param_nodes[i];
+                            const param_node = &self.nodes[param_node_id.index];
+                            const param = &param_node.kind.parameter;
+
+                            if (param.default == null) {
+                                std.log.err("Missing value for parameter `{s}`", .{param.name}); // @TODO: print the types
+                            }
+                        }
                     }
                 }
 
@@ -682,11 +756,11 @@ pub const TypeChecker = struct {
 
                 const true_block_ty = blk1: {
                     const nodes = self.nodesRange(expr.true_block);
-                    for (nodes[0..@max(nodes.len - 1, 0)]) |id| {
-                        _ = try self.typeCheckNode(id);
-                    }
-
                     if (nodes.len > 0) {
+                        for (nodes[0 .. nodes.len - 1]) |id| {
+                            _ = try self.typeCheckNode(id);
+                        }
+
                         break :blk1 try self.typeCheckNode(nodes[nodes.len - 1]);
                     }
 
@@ -695,11 +769,12 @@ pub const TypeChecker = struct {
 
                 const false_block_ty = if (expr.false_block) |block| blk1: {
                     const nodes = self.nodesRange(block);
-                    for (nodes[0..@max(nodes.len - 1, 0)]) |id| {
-                        _ = try self.typeCheckNode(id);
-                    }
 
                     if (nodes.len > 0) {
+                        for (nodes[0 .. nodes.len - 1]) |id| {
+                            _ = try self.typeCheckNode(id);
+                        }
+
                         break :blk1 try self.typeCheckNode(nodes[nodes.len - 1]);
                     }
 
@@ -752,6 +827,17 @@ pub const TypeChecker = struct {
 
                 break :blk self.interner.unitTy();
             },
+            .const_expr => |expr| try self.typeCheckNode(expr.expr),
+            .const_block => |expr| blk: {
+                const nodes = self.nodesRange(expr.block);
+                if (nodes.len > 0) {
+                    for (nodes[0 .. nodes.len - 1]) |id| {
+                        _ = try self.typeCheckNode(id);
+                    }
+                    break :blk try self.typeCheckNode(nodes[nodes.len - 1]);
+                }
+                break :blk self.interner.unitTy();
+            },
             .parameter => |param| blk: {
                 const ty = try self.typeCheckNode(param.ty);
                 const actual_ty = if (ty.* == .type) ty.type else blk1: {
@@ -767,19 +853,34 @@ pub const TypeChecker = struct {
                     }
                 }
 
+                try self.declared_types.put(node_id, actual_ty);
+
                 break :blk actual_ty;
             },
 
             .array_init_or_slice_one => |expr| blk: {
                 const expr_ty = try self.typeCheckNode(expr.expr);
-                const value_expr = if (expr.value) |val|
-                    try self.typeCheckNode(val)
-                else
-                    null;
+                const value_expr = if (expr.value) |val| blk1: {
+                    _ = try self.typeCheckNode(val);
+
+                    const save_point = self.evaluator.save();
+                    const old_ec = self.evaluator.eval_const;
+                    self.evaluator.eval_const = true;
+                    const value_id = try self.evaluator.evalNode(val);
+                    self.evaluator.eval_const = old_ec;
+
+                    const value = if (value_id) |id| self.evaluator.instructions.items[id.index] else null;
+                    if (value_id == null or value.?.kind != .constant or value.?.value.?.kind != .int) {
+                        std.log.err("Expected constant int for array type size!", .{});
+                    }
+                    self.evaluator.reset(save_point);
+
+                    break :blk1 value.?.value.?.kind.int;
+                } else null;
 
                 if (expr_ty.* == .type) {
-                    const ty = if (value_expr) |_|
-                        self.interner.arrayTy(expr_ty.*.type, 0)
+                    const ty = if (value_expr) |size|
+                        self.interner.arrayTy(expr_ty.*.type, @intCast(size))
                     else
                         self.interner.sliceTy(expr_ty.*.type, expr.mut);
 
@@ -910,6 +1011,7 @@ pub const TypeChecker = struct {
                     break :blk self.interner.typeTy(self.interner.uintTy(size));
                 }
             },
+            .type_bool => self.interner.typeTy(self.interner.boolTy()),
             .type_float => |size| self.interner.typeTy(self.interner.floatTy(size)),
 
             else => blk: {
@@ -943,6 +1045,10 @@ pub const TypeChecker = struct {
             },
             .float_literal => switch (to.*) {
                 .float => true,
+                else => false,
+            },
+            .array => |farr| switch (to.*) {
+                .array => |tarr| farr.size == tarr.size and canCoerce(farr.base, tarr.base),
                 else => false,
             },
             else => false,

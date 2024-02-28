@@ -74,12 +74,14 @@ pub const TokenKind = union(enum) {
     uint: usize,
     int: usize,
     float: usize,
+    bool,
     @"export",
     @"extern",
 };
 
 pub const SourceInfo = struct {
     position: usize,
+    len: usize,
 };
 
 pub const Lexer = struct {
@@ -122,10 +124,16 @@ pub const Lexer = struct {
 
     pub fn resync(self: *Self) void {
         if (self.peek_buff != null) {
-            self.peek_buff  = null;
-            self.position = self.source_info.items[self.source_info.items.len - 2].position;
+            self.peek_buff = null;
+            var i = self.source_info.items.len - 2;
+            var src_info = self.source_info.items[i];
+            while (src_info.len == 1 and self.source[src_info.position] == '\n') : (src_info = self.source_info.items[i]) {
+                i -= 1;
+            }
+            self.position = src_info.position + src_info.len;
         } else {
-            self.position = self.source_info.getLast().position;
+            const src_info = self.source_info.getLast();
+            self.position = src_info.position + src_info.len;
         }
     }
 
@@ -136,7 +144,16 @@ pub const Lexer = struct {
             return pk;
         }
 
-        // eat whitespace
+        // eat whitespace and comments
+        while (self.position < self.source.len and self.source[self.position] != '\n' and std.ascii.isWhitespace(self.source[self.position])) : (self.position += 1) {}
+        if (self.position < self.source.len and self.source[self.position] == '/' and self.source[self.position + 1] == '/') {
+            while (self.position < self.source.len and self.source[self.position] != '\n') : (self.position += 1) {}
+            self.position += 1;
+        }
+        if (self.position < self.source.len and self.source[self.position] == '/' and self.source[self.position + 1] == '*') {
+            while (self.position + 1 < self.source.len and self.source[self.position] != '*' and self.source[self.position + 1] != '/') : (self.position += 1) {}
+            self.position += 1;
+        }
         while (self.position < self.source.len and self.source[self.position] != '\n' and std.ascii.isWhitespace(self.source[self.position])) : (self.position += 1) {}
 
         if (self.position >= self.source.len) {
@@ -274,11 +291,11 @@ pub const Lexer = struct {
             },
         };
 
+        self.position += result[1];
         self.source_info.append(.{
             .position = old_position,
+            .len = self.position - old_position,
         }) catch @panic("Memory error");
-
-        self.position += result[1];
 
         const index = self.index;
         self.index += 1;
@@ -307,6 +324,7 @@ pub const keyword_map = std.ComptimeStringMap(TokenKind, [_]KV{
     .{ "const", .@"const" },
     .{ "true", .{ .bool_literal = true } },
     .{ "false", .{ .bool_literal = false } },
+    .{ "bool", .bool },
     .{ "uint", .{ .uint = 0 } },
     .{ "uint8", .{ .uint = 8 } },
     .{ "uint16", .{ .uint = 16 } },

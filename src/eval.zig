@@ -48,6 +48,7 @@ pub const Instruction = struct {
                 std.debug.print("\n", .{});
             },
             .identifier => |value| std.debug.print("  {}-{}\n", .{ value.file, value.index }),
+            .argument => |value| std.debug.print("  {}-{}\n", .{ value.file, value.index }),
 
             .binding => |cexpr| {
                 std.debug.print("  node: {}-{}\n", .{ cexpr.node.file, cexpr.node.index });
@@ -94,20 +95,21 @@ pub const Instruction = struct {
                     std.debug.print("  false_block: {}-{}\n", .{ blk.start, blk.start + blk.len });
                 }
             },
+            .array_init => |value| {
+                std.debug.print("  range: {}-{}\n", .{ value.exprs.start, value.exprs.start + value.exprs.len });
+            },
 
             .loop => |loop| {
-                if (loop.expr) |expr| {
+                std.debug.print("  loop_block: {}-{}\n", .{ loop.loop_block.start, loop.loop_block.start + loop.loop_block.len });
+            },
+            .@"break" => |brk| {
+                if (brk.expr) |expr| {
                     std.debug.print("  expr: {}-{}\n", .{ expr.file, expr.index });
                 }
-                // if (loop.captures) |capt| {
-                //     std.debug.print("  captures: {}-{}\n", .{ capt.start, capt.start + capt.len });
-                // }
-                std.debug.print("  loop_block: {}-{}\n", .{ loop.loop_block.start, loop.loop_block.start + loop.loop_block.len });
-                if (loop.else_block) |block| {
-                    std.debug.print("  else_block: {}-{}\n", .{ block.start, block.start + block.len });
-                }
-                if (loop.finally_block) |block| {
-                    std.debug.print("  finally_block: {}-{}\n", .{ block.start, block.start + block.len });
+            },
+            .ret => |ret| {
+                if (ret.expr) |expr| {
+                    std.debug.print("  expr: {}-{}\n", .{ expr.file, expr.index });
                 }
             },
         }
@@ -117,6 +119,7 @@ pub const Instruction = struct {
 pub const InstructionKind = union(enum) {
     constant,
     identifier: node.NodeId,
+    argument: InstructionId,
 
     binding: struct {
         node: node.NodeId,
@@ -150,13 +153,20 @@ pub const InstructionKind = union(enum) {
         true_block: InstructionRange,
         false_block: ?InstructionRange,
     },
+    array_init: struct {
+        exprs: InstructionRange,
+    },
 
     loop: struct {
-        expr: ?InstructionId,
         // captures: ?NodeRange,
         loop_block: InstructionRange,
-        else_block: ?InstructionRange,
-        finally_block: ?InstructionRange,
+    },
+    @"break": struct {
+        expr: ?InstructionId,
+    },
+
+    ret: struct {
+        expr: ?InstructionId,
     },
 };
 
@@ -197,18 +207,20 @@ pub const Evaluator = struct {
     nodes: []const node.Node,
     node_ranges: []const node.NodeId,
 
-    node_refs: analyze.NodeRefMap,
+    analyzer: *const analyze.Analyzer,
 
     instructions: std.ArrayList(Instruction),
     instruction_ranges: std.ArrayList(InstructionId),
     functions: std.AutoHashMap(node.NodeId, FunctionValue),
     types: std.AutoHashMap(node.NodeId, TypeValue),
 
-    type_info: typecheck.TypeInfo,
+    typechecker: *const typecheck.TypeChecker,
 
     bound_values: std.ArrayList(std.AutoHashMap(node.NodeId, BoundValue)),
     eval_const: bool,
+    instr_to_node: std.AutoHashMap(InstructionId, node.NodeId),
 
+    greedy: bool = true,
     make_ref: bool = false,
 
     const Self = @This();
@@ -216,8 +228,8 @@ pub const Evaluator = struct {
     pub fn init(
         nodes: []const node.Node,
         node_ranges: []const node.NodeId,
-        node_refs: analyze.NodeRefMap,
-        type_info: typecheck.TypeInfo,
+        analyzer: *const analyze.Analyzer,
+        typechecker: *const typecheck.TypeChecker,
         gpa: std.mem.Allocator,
         arena: std.mem.Allocator,
     ) Self {
@@ -226,20 +238,24 @@ pub const Evaluator = struct {
             .arena = arena,
             .nodes = nodes,
             .node_ranges = node_ranges,
-            .node_refs = node_refs,
+            .analyzer = analyzer,
+            .typechecker = typechecker,
             .instructions = std.ArrayList(Instruction).init(gpa),
             .instruction_ranges = std.ArrayList(InstructionId).init(gpa),
-            .type_info = type_info,
             .functions = std.AutoHashMap(node.NodeId, FunctionValue).init(gpa),
             .types = std.AutoHashMap(node.NodeId, TypeValue).init(gpa),
             .bound_values = std.ArrayList(std.AutoHashMap(node.NodeId, BoundValue)).init(gpa),
             .eval_const = false,
+            .instr_to_node = std.AutoHashMap(InstructionId, node.NodeId).init(gpa),
         };
+    }
+
+    pub fn setup(self: *Self) !void {
+        try self.pushScope();
     }
 
     pub fn eval(self: *Self, ids: []const node.NodeId) ![]const InstructionId {
         var these_instrs = std.ArrayList(InstructionId).init(self.arena);
-        try self.pushScope();
 
         for (ids) |id| {
             const instr = try self.evalNode(id);
@@ -262,9 +278,15 @@ pub const Evaluator = struct {
             .bool_literal => |value| try self.createConst(.{ .bool = value }),
             .string_literal => |value| try self.createConst(.{ .str = value }),
             .identifier => |_| blk: {
-                const ref_node = self.node_refs.getEntry(id) orelse @panic("No noderef entry");
+                const ref_node = self.analyzer.node_ref.getEntry(id) orelse @panic("No noderef entry");
                 if (self.eval_const) {
-                    if (self.resolveValueUp(ref_node.value_ptr.*)) |value| {
+                    var resolved_value = self.resolveValueUp(ref_node.value_ptr.*);
+                    if (self.greedy and resolved_value == null) {
+                        _ = try self.evalNode(ref_node.value_ptr.*);
+                        resolved_value = self.resolveValueUp(ref_node.value_ptr.*);
+                    }
+
+                    if (resolved_value) |value| {
                         if (self.make_ref) {
                             break :blk try self.createConst(.{
                                 .ref = .{
@@ -555,38 +577,159 @@ pub const Evaluator = struct {
                     }
                 }
 
-                const cond_id = if (expr.expr) |cond|
-                    try self.evalNode(cond) orelse @panic("invalid condition")
-                else
-                    null;
+                var starti = self.instruction_ranges.items.len;
+                var add_len: u32 = 0;
+                if (expr.expr) |cond| {
+                    const cond_id = try self.evalNode(cond) orelse @panic("invalid condition");
 
-                const loop_block = try self.evalRange(expr.loop_block);
-                const else_block = if (expr.else_block) |block| try self.evalRange(block) else null;
-                const finally_block = if (expr.finally_block) |block| try self.evalRange(block) else null;
+                    const starti_true = self.instruction_ranges.items.len;
+                    if (expr.finally_block) |block| {
+                        _ = try self.evalRange(block);
+                    }
 
-                break :blk try self.createInstruction(.{
+                    try self.instruction_ranges.append(try self.createInstruction(.{
+                        .@"break" = .{
+                            .expr = null,
+                        },
+                    }));
+
+                    starti = self.instruction_ranges.items.len;
+                    try self.instruction_ranges.append(try self.createInstruction(.{
+                        .if_expr = .{
+                            .cond = cond_id,
+                            .false_block = .{
+                                .start = @truncate(starti_true),
+                                .len = @truncate(starti - starti_true),
+                            },
+                            .true_block = .{
+                                .start = @truncate(starti_true),
+                                .len = 0,
+                            },
+                        },
+                    }));
+                    add_len = 1;
+                }
+
+                var loop_block = try self.evalRange(expr.loop_block);
+                loop_block.start = @truncate(starti);
+                loop_block.len += add_len;
+
+                const loop = try self.createInstruction(.{
                     .loop = .{
-                        .expr = cond_id,
                         .loop_block = loop_block,
-                        .else_block = else_block,
-                        .finally_block = finally_block,
                     },
+                });
+
+                if (expr.else_block) |eblock| {
+                    if (expr.expr) |cond| {
+                        const cond_id = try self.evalNode(cond) orelse @panic("invalid condition");
+                        starti = self.instruction_ranges.items.len;
+                        try self.instruction_ranges.append(loop);
+                        const leni = self.instruction_ranges.items.len - starti;
+
+                        const else_block = try self.evalRange(eblock);
+
+                        break :blk try self.createInstruction(.{
+                            .if_expr = .{
+                                .cond = cond_id,
+                                .true_block = .{
+                                    .start = @truncate(starti),
+                                    .len = @truncate(leni),
+                                },
+                                .false_block = else_block,
+                            },
+                        });
+                    } else {
+                        break :blk loop;
+                    }
+                } else {
+                    break :blk loop;
+                }
+            },
+            .array_init_or_slice_one => |ai| blk: {
+                if (self.eval_const) {
+                    @panic("Unimplemetned");
+                }
+
+                const ty = self.typechecker.types.get(id) orelse @panic("Unable to get node type");
+                if (ty.* == .type) {
+                    // @TODO: wait what
+                    break :blk try self.createConst(.undef);
+                } else {
+                    const starti = self.instruction_ranges.items.len;
+                    const expr_id = try self.evalNode(ai.expr) orelse @panic("unable to eval array init node");
+                    try self.instruction_ranges.append(expr_id);
+                    break :blk try self.createInstruction(.{
+                        .array_init = .{
+                            .exprs = .{
+                                .start = @truncate(starti),
+                                .len = 1,
+                            },
+                        },
+                    });
+                }
+            },
+            .array_init => |ai| blk: {
+                if (self.eval_const) {
+                    @panic("Unimplemetned");
+                }
+
+                const range = try self.evalRange(ai.exprs);
+                break :blk try self.createInstruction(.{
+                    .array_init = .{ .exprs = range },
                 });
             },
             .binding => |bind| blk: {
-                if (self.type_info.declared_types.get(id)) |ty| {
+                if (self.typechecker.declared_types.get(id)) |ty| {
                     if (ty.* == .named or ty.* == .func) {
                         const value_node = self.nodes[bind.value.index];
                         switch (value_node.kind) {
                             .func => |func| {
-                                const instructions = try self.evalRange(func.block);
+                                var instructions = try self.evalRange(func.block);
+                                if (instructions.len > 0) {
+                                    const last_instr = self.instruction_ranges.items[instructions.start + instructions.len - 1];
+                                    const last_node = self.node_ranges[func.block.start + func.block.len - 1];
+                                    const last_instr_ty = self.typechecker.types.getEntry(last_node) orelse @panic("Unable to get type entry for last instructino!");
+                                    const fn_ret_ty = ty.func.ret_ty;
+                                    //
+                                    // TODO: check if return instruction
+                                    std.debug.assert((last_instr_ty.value_ptr.*.* == .unit and fn_ret_ty == null) or (last_instr_ty.value_ptr.*) == (fn_ret_ty.?));
+
+                                    const instr = try self.createInstruction(.{ .ret = .{ .expr = last_instr } });
+                                    // try self.instruction_ranges.append(instr);
+                                    self.instruction_ranges.items[self.instruction_ranges.items.len - 1] = instr;
+                                } else {
+                                    const instr = try self.createInstruction(.{ .ret = .{ .expr = null } });
+                                    try self.instruction_ranges.append(instr);
+                                    // self.instruction_ranges.items[self.instruction_ranges.items.len - 1] = instr;
+                                    instructions.len += 1;
+                                }
                                 try self.functions.put(id, .{
                                     .node_id = bind.value,
                                     .instructions = instructions,
                                 });
                             },
                             .func_no_params => |func| {
-                                const instructions = try self.evalRange(func.block);
+                                var instructions = try self.evalRange(func.block);
+                                if (instructions.len > 0) {
+                                    const last_instr = self.instruction_ranges.items[instructions.start + instructions.len - 1];
+                                    const last_node = self.node_ranges[func.block.start + func.block.len - 1];
+                                    const last_instr_ty = self.typechecker.types.getEntry(last_node) orelse @panic("Unable to get type entry for last instructino!");
+                                    const fn_ret_ty = ty.func.ret_ty;
+                                    //
+                                    // TODO: check if return instruction
+                                    std.debug.assert((last_instr_ty.value_ptr.*.* == .unit and fn_ret_ty == null) or (last_instr_ty.value_ptr.*) == (fn_ret_ty.?));
+
+                                    const instr = try self.createInstruction(.{ .ret = .{ .expr = last_instr } });
+                                    // try self.instruction_ranges.append(instr);
+                                    self.instruction_ranges.items[self.instruction_ranges.items.len - 1] = instr;
+                                } else {
+                                    const instr = try self.createInstruction(.{ .ret = .{ .expr = null } });
+                                    try self.instruction_ranges.append(instr);
+                                    // self.instruction_ranges.items[self.instruction_ranges.items.len - 1] = instr;
+                                    instructions.len += 1;
+                                }
+                                // instructions.len += 1;
                                 try self.functions.put(id, .{
                                     .node_id = bind.value,
                                     .instructions = instructions,
@@ -658,10 +801,62 @@ pub const Evaluator = struct {
             // @TODO: Maybe do something with key here?
             .key_value => |kv| try self.evalNode(kv.value),
             .key_value_ident => |kv| try self.evalNode(kv.value),
-            .argument => |expr| try self.evalNode(expr),
+            .argument => |expr| try self.createInstruction(.{
+                .argument = try self.evalNode(expr) orelse @panic("invalid arg"),
+            }),
             .invoke => |inv| blk: {
                 const saved = self.save();
                 const expr_id = try self.evalNode(inv.expr) orelse @panic("Invalid function");
+
+                // Get referenced function info
+                const ref_node_id = self.analyzer.node_ref.get(id) orelse @panic("uanble to get node ref");
+                const bind_func_node = &self.nodes[ref_node_id.index].kind.binding;
+                const func_node = &self.nodes[bind_func_node.value.index];
+                const func_scope = blk1: {
+                    const path = self.analyzer.node_to_path.get(ref_node_id) orelse @panic("unable to get node path");
+                    const scope = self.analyzer.getScopeFromPath(path) orelse @panic("unable to get scope form apth");
+                    break :blk1 scope;
+                };
+
+                const fn_ty = self.typechecker.types.get(inv.expr) orelse @panic("No type info for callee");
+                const expected_types = self.typechecker.interner.getMultiTypes(fn_ty.func.params);
+
+                var ordered_args = std.ArrayList(InstructionId).init(self.arena);
+                try ordered_args.ensureTotalCapacity(expected_types.len);
+                ordered_args.items.len = expected_types.len;
+
+                var unused_args = std.bit_set.IntegerBitSet(256).initEmpty();
+                unused_args.setRangeValue(.{ .start = 0, .end = expected_types.len }, true);
+
+                // @TODO: work in trailing block
+                const arg_nodes = self.nodesRange(inv.args);
+                for (arg_nodes) |arg_id| {
+                    const param_node_id = self.analyzer.node_ref.get(arg_id) orelse @panic("unable to get node ref");
+                    const param_node = &self.nodes[param_node_id.index];
+                    const param = &param_node.kind.parameter;
+
+                    const param_name = try self.analyzer.getSegment(param.name) orelse @panic("Unable to get param segment");
+                    const param_scope = func_scope.children.get(param_name) orelse @panic("Couldn't get parameter in function");
+                    const param_index = param_scope.kind.local.parameter.?;
+
+                    ordered_args.items[param_index] = try self.evalNode(arg_id) orelse @panic("Invalid argument");
+                    unused_args.unset(param_index);
+                }
+
+                if (func_node.kind == .func) {
+                    const param_nodes = self.nodesRange(func_node.kind.func.params);
+                    for (0..expected_types.len) |i| {
+                        // check if remaining args have a default. error if they dont
+                        if (unused_args.isSet(i)) {
+                            const param_node_id = param_nodes[i];
+                            const param_node = &self.nodes[param_node_id.index];
+                            const param = &param_node.kind.parameter;
+
+                            ordered_args.items[i] = try self.evalNode(param.default.?) orelse @panic("Invalid default value");
+                        }
+                    }
+                }
+
                 if (self.eval_const) {
                     const expr_value = self.instructions.items[expr_id.index];
 
@@ -669,23 +864,23 @@ pub const Evaluator = struct {
                         try self.pushScope();
                         defer self.popScope();
 
-                        const args = self.nodesRange(inv.args);
-                        const func_node = self.nodes[expr_value.value.?.kind.func.node_id.index];
                         const block = switch (func_node.kind) {
                             .func => |f| blk1: {
+                                const param_nodes = self.nodesRange(f.params);
                                 std.debug.assert(f.params.len == inv.args.len); // this should be handled in typecheck
 
-                                for (args) |arg| {
-                                    const arg_instr = try self.evalNode(arg) orelse @panic("Invalid argument");
-                                    const ref_node = self.node_refs.getEntry(arg) orelse {
-                                        std.log.err("Unable to get node ref entry for argument! {}", .{arg});
-                                        continue;
-                                    };
+                                for (ordered_args.items, 0..) |arg, i| {
+                                    const param_node_id = param_nodes[i];
+                                    const arg_value = self.instructions.items[arg.index].kind.argument;
+                                    const constant_value = self.instructions.items[arg_value.index];
+                                    if (constant_value.kind != .constant) {
+                                        std.log.err("Attempted to call constant function with runtime arguments!", .{});
+                                    }
 
                                     try self.bound_values.items[self.bound_values.items.len - 1].put(
-                                        ref_node.value_ptr.*,
+                                        param_node_id,
                                         .{
-                                            .value = self.instructions.items[arg_instr.index].value.?,
+                                            .value = self.instructions.items[arg_value.index].value.?,
                                             .mutable = false,
                                         },
                                     );
@@ -711,12 +906,16 @@ pub const Evaluator = struct {
                     }
                 }
 
-                // @TODO: work in trailing block
-                const args = try self.evalRange(inv.args);
+                const starti = self.instruction_ranges.items.len;
+                try self.instruction_ranges.appendSlice(ordered_args.items);
+
                 break :blk try self.createInstruction(.{
                     .invoke = .{
                         .expr = expr_id,
-                        .args = args,
+                        .args = .{
+                            .start = @truncate(starti),
+                            .len = @truncate(self.instruction_ranges.items.len - starti),
+                        },
                     },
                 });
             },
@@ -726,6 +925,10 @@ pub const Evaluator = struct {
                 break :blk null;
             },
         };
+
+        if (result) |res| {
+            try self.instr_to_node.put(res, id);
+        }
 
         // if (result) |res| {
         //     std.log.info("{} {}", .{ res.index, id.index });
@@ -793,7 +996,11 @@ pub const Evaluator = struct {
     }
 
     // fn evalFunction()
+    // fn evalRange(self: *Self, range: node.NodeRange) !InstructionRange {
+    //     self.evalRangeRetLast(range, false);
+    // }
 
+    // fn evalRangeRetLast(self: *Self, range: node.NodeRange, ret_last: bool) !InstructionRange {
     fn evalRange(self: *Self, range: node.NodeRange) !InstructionRange {
         if (range.len == 0) return .{
             .start = @truncate(self.instruction_ranges.items.len),
@@ -871,14 +1078,14 @@ pub const Evaluator = struct {
         return &self.instructions.items[id.index].value.?;
     }
 
-    inline fn save(self: *const Self) SavePoint {
+    pub inline fn save(self: *const Self) SavePoint {
         return .{
             .instruction_length = self.instructions.items.len,
             .instruction_range_length = self.instruction_ranges.items.len,
         };
     }
 
-    inline fn reset(self: *Self, save_point: SavePoint) void {
+    pub inline fn reset(self: *Self, save_point: SavePoint) void {
         self.instructions.items.len = save_point.instruction_length;
         self.instruction_ranges.items.len = save_point.instruction_range_length;
     }

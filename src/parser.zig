@@ -107,6 +107,7 @@ pub const Parser = struct {
             else => blk: {
                 const expr = try self.parseExpr();
 
+                self.nodes.items[expr.index].print();
                 if (self.nextIsNoNL(.identifier)) {
                     self.lexer.resync();
                 }
@@ -646,6 +647,7 @@ pub const Parser = struct {
             .float => |size| self.createNodeAndNext(.{
                 .type_float = size,
             }),
+            .bool => self.createNodeAndNext(.type_bool),
             else => error.UnexpectedToken,
         };
     }

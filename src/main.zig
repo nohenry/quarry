@@ -4,6 +4,7 @@ const parser = @import("parser.zig");
 const analyze = @import("analyze.zig");
 const type_check = @import("typecheck.zig");
 const eval = @import("eval.zig");
+const gen = @import("gen.zig");
 
 pub const std_options = .{
     .logFn = myLogFn,
@@ -77,21 +78,24 @@ pub fn main() !void {
     var tycheck = try type_check.TypeChecker.init(
         prsr.nodes.items,
         prsr.node_ranges.items,
-        anal.node_ref,
+        &anal,
         alloc.allocator(),
         arena.allocator(),
     );
-
-    const type_info = try tycheck.typeCheck(ids);
 
     var evaluator = eval.Evaluator.init(
         prsr.nodes.items,
         prsr.node_ranges.items,
-        anal.node_ref,
-        type_info,
+        &anal,
+        &tycheck,
         alloc.allocator(),
         arena.allocator(),
     );
+
+    tycheck.setup(&evaluator);
+    try evaluator.setup();
+
+    _ = try tycheck.typeCheck(ids);
     const instrs = try evaluator.eval(ids);
 
     std.debug.print("File items: \n", .{});
@@ -110,6 +114,9 @@ pub fn main() !void {
     for (evaluator.instructions.items) |instr| {
         instr.print();
     }
+
+    var code_gen = gen.CodeGenerator.init(&anal, &evaluator, &tycheck, arena.allocator(), alloc.allocator());
+    try code_gen.genInstructions(instrs);
 
     arena.deinit();
 

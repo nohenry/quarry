@@ -172,6 +172,7 @@ pub const Node = struct {
             },
             .type_opt => |_| {},
 
+            .type_bool => {},
             .type_int => |size| {
                 std.debug.print("  size: {}\n", .{size});
             },
@@ -304,6 +305,7 @@ pub const NodeKind = union(enum) {
     type_int: usize,
     type_uint: usize,
     type_float: usize,
+    type_bool,
 };
 
 pub const Operator = enum {
@@ -341,6 +343,8 @@ pub const Operator = enum {
     lt,
     lte,
 
+    bang,
+
     pub fn fromTokenKind(kind: tokenize.TokenKind) ?Operator {
         return switch (kind) {
             .plus => .plus,
@@ -374,6 +378,7 @@ pub const Operator = enum {
             .gte => .gte,
             .lt => .lt,
             .lte => .lte,
+            .bang => .bang,
 
             else => null,
         };

@@ -19,6 +19,13 @@ const operators = [
     [">=", "binary_relation"],
     [">", "binary_relation"],
     ["|>", "binary_pipe"],
+    ["+=", "assign"],
+    ["-=", "assign"],
+    ["*=", "assign"],
+    ["/=", "assign"],
+    ["&=", "assign"],
+    ["|=", "assign"],
+    ["^=", "assign"],
 ]
 
 /* eslint-disable arrow-parens */
@@ -44,6 +51,7 @@ module.exports = grammar({
             "binary_relation",
             "binary_equality",
             "binary_pipe",
+            "assign",
             $.closure,
             $.const_expr,
         ],
@@ -68,13 +76,14 @@ module.exports = grammar({
 
         file_item: ($) => choice(
             $.binding,
+            seq($.expression, '=', $.expression),
             $.type,
         ),
         block_stmts: ($) => repeat1(seq(choice($.file_item), '\n')),
 
         binding: ($) =>
             seq(
-                "let",
+                choice("let", $.type),
                 optional("mut"),
                 field("name", $.identifier),
                 "=",
@@ -86,6 +95,7 @@ module.exports = grammar({
                 $.primary_expression,
                 $.unary_expression,
                 $.binary_expression,
+                $.identifier,
 
                 $.if_expr,
                 $.loop_expr,
@@ -140,7 +150,7 @@ module.exports = grammar({
         type_union: $ => prec.left(seq($.union_member, repeat(seq("|", $.union_member)))),
         union_member: $ => prec.left(10, seq(
             $.identifier,
-            prec(10, optional(seq(":", $.type))),
+            prec.left(10, optional(seq(":", $.type))),
             optional(seq("=", $.expression)),
         )),
 
@@ -232,7 +242,7 @@ module.exports = grammar({
                     // $.match_expr,
                     // $.do_block,
                     $.closure,
-                    $.identifier,
+                    // $.identifier,
                     $.array_or_record_expr,
 
                     // prec("do_expr", $.type)

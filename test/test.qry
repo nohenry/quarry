@@ -1,14 +1,12 @@
 
+let b = const a
+let c = const b
+let d = const c
+int32 a = 3
 
-let sum = (int8 foo, int8 bar) uint8 {
-    let mut i = bar
-    let mut s = 0
-    loop i > 0 { 
-        i -= 1 
-        s += i
-    }
+let array_size = () int8 { 4 }
 
-    bar * (foo + s)
+let main = (int8 argc) int8 {
+    [int8: array_size()] arr = [1, 2, 3]
+    0
 }
-
-let a = const sum(2, bar: 10)

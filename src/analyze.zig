@@ -187,6 +187,7 @@ pub const Analyzer = struct {
     nodes: []const node.Node,
     deferred: bool = false,
 
+    param_doing_default: bool = false,
     param_index: ?u32 = 0,
     last_ref: ?node.NodeId = null,
 
@@ -254,6 +255,7 @@ pub const Analyzer = struct {
         const node_value = self.nodes[index.index];
 
         switch (node_value.kind) {
+            .type_int, .type_uint, .type_float, .type_bool => {},
             .binding => |value| {
                 const init_node = self.nodes[value.value.index];
                 switch (init_node.kind) {
@@ -343,11 +345,15 @@ pub const Analyzer = struct {
                 self.popScope();
 
                 if (value.default) |def| {
+                    self.param_doing_default = true;
                     try self.analyzeNode(def);
+                } else if (self.param_doing_default) {
+                    std.log.err("Default arguments should be after all positional arguments!", .{});
                 }
             },
             .func => |fval| {
                 const param_nodes = self.nodesRange(fval.params);
+                self.param_doing_default = false;
                 for (param_nodes, 0..) |param, i| {
                     self.param_index = @truncate(i);
                     try self.analyzeNode(param);
@@ -397,10 +403,10 @@ pub const Analyzer = struct {
                 try self.analyzeNode(expr.expr);
                 var doing_named: bool = false;
 
-                const arg_nodes = self.nodesRange(expr.args);
                 const func_scope = if (self.last_ref) |ref| blk1: {
                     const path = self.node_to_path.get(ref) orelse break :blk1 null;
                     const scope = self.getScopeFromPath(path) orelse break :blk1 null;
+                    try self.node_ref.put(index, ref);
                     break :blk1 scope;
                 } else {
                     try self.deferred_nodes.append(.{
@@ -409,6 +415,10 @@ pub const Analyzer = struct {
                     });
                     break :blk;
                 };
+
+                // keep track of typechecked arguments. used for default args
+                var checked_args = std.bit_set.IntegerBitSet(256).initEmpty();
+                const arg_nodes = self.nodesRange(expr.args);
 
                 if (func_scope == null) {
                     std.log.err("Unable to get function scope!", .{});
@@ -423,11 +433,21 @@ pub const Analyzer = struct {
 
                             blk1: {
                                 const key = try self.segment(kv.key);
-                                if (func_scope == null) {} else if (func_scope.?.children.get(key)) |param| {
+                                if (func_scope == null) {
+                                    @panic("hmm expected fn");
+                                } else if (func_scope.?.children.get(key)) |param| {
                                     if (param.kind == .local and param.kind.local.parameter != null) {
                                         const param_node_id = self.path_to_node.get(param.path);
                                         if (param_node_id) |id| {
-                                            try self.node_ref.put(item, id);
+                                            const ref_entry = try self.node_ref.getOrPut(item);
+                                            if (checked_args.isSet(param.kind.local.parameter.?) or ref_entry.found_existing) {
+                                                std.log.err("Parameter `{s}` already has been passed a value", .{key});
+                                            }
+
+                                            checked_args.set(param.kind.local.parameter.?);
+
+                                            // Reference argument node to parameter node
+                                            ref_entry.value_ptr.* = id;
                                             break :blk1;
                                         }
                                     }
@@ -447,7 +467,15 @@ pub const Analyzer = struct {
                                     if (lcl.value_ptr.kind == .local and lcl.value_ptr.kind.local.parameter != null and lcl.value_ptr.kind.local.parameter.? == i) {
                                         const param_node_id = self.path_to_node.get(lcl.value_ptr.path);
                                         if (param_node_id) |id| {
-                                            try self.node_ref.put(item, id);
+                                            const ref_entry = try self.node_ref.getOrPut(item);
+                                            if (checked_args.isSet(lcl.value_ptr.kind.local.parameter.?) or ref_entry.found_existing) {
+                                                std.log.err("Parameter `{s}` already has been passed a value", .{lcl.key_ptr.*});
+                                            }
+
+                                            checked_args.set(lcl.value_ptr.kind.local.parameter.?);
+
+                                            // Reference argument node to parameter node
+                                            ref_entry.value_ptr.* = id;
                                         } else {
                                             std.log.err("Unable to get parameter node id", .{});
                                         }
@@ -599,11 +627,11 @@ pub const Analyzer = struct {
             .type_opt => |opt| {
                 try self.analyzeNode(opt.ty);
             },
-            else => std.log.err("Unhandled case: {}", .{node_value}),
+            // else => std.log.err("Unhandled case: {}", .{node_value}),
         }
     }
 
-    fn nodesRange(self: *const Self, range: node.NodeRange) []const node.NodeId {
+    pub fn nodesRange(self: *const Self, range: node.NodeRange) []const node.NodeId {
         return self.node_ranges[range.start .. range.start + range.len];
     }
 
@@ -619,7 +647,7 @@ pub const Analyzer = struct {
         }
     }
 
-    fn getScopeFromPath(self: *Self, path: Path) ?*Scope {
+    pub fn getScopeFromPath(self: *const Self, path: Path) ?*const Scope {
         var current_scope = &self.root_scope;
         var seg = path.segments[1..];
         while (seg.len > 0) : (seg = seg[1..]) {
@@ -669,7 +697,7 @@ pub const Analyzer = struct {
         return last;
     }
 
-    fn segment(self: *Self, name: []const u8) !PathSegment {
+    pub fn segment(self: *Self, name: []const u8) !PathSegment {
         if (self.segment_set.getEntry(name)) |value| {
             return value.key_ptr.*;
         }
@@ -678,5 +706,13 @@ pub const Analyzer = struct {
         try self.segment_set.put(value, {});
 
         return value;
+    }
+
+    pub fn getSegment(self: *const Self, name: []const u8) !?PathSegment {
+        if (self.segment_set.getEntry(name)) |value| {
+            return value.key_ptr.*;
+        }
+
+        return null;
     }
 };

@@ -13,10 +13,10 @@
 )
 
 (call_expression
-  function: (expression (primary_expression (identifier) @function)))
+  function: (expression (identifier) @function))
 
 (call_expression
-  function: (expression (primary_expression (identifier) @function.builtin (#lua-match? @function.builtin "^:[a-zA-Z0-9]*"))))
+  function: (expression (identifier) @function.builtin (#lua-match? @function.builtin "^:[a-zA-Z0-9]*")))
 
 (record_field
   name: (identifier) @variable.member
@@ -45,7 +45,7 @@
   (identifier) @constant
 )
 
-(file_item (type (expression (primary_expression (identifier) @attribute (#match? "^:[a-zA-Z0-9]+")))))
+(file_item (type (expression (identifier) @attribute (#match? "^:[a-zA-Z0-9]+"))))
 
 [
     (true)

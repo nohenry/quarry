@@ -22,7 +22,9 @@ pub fn package(
     _: struct {},
 ) !Package {
     const llvm_wrap = b.addModule("llvm_wrap", .{
-        .root_source_file = .{ .path = "src/root.zig" },
+        .root_source_file = .{ .path = thisDir() ++ "/src/root.zig" },
+        .target = target,
+        .optimize = optimize,
     });
 
     const llvm_wrap_c = b.addStaticLibrary(.{
@@ -35,7 +37,6 @@ pub fn package(
     // const link_dynamic: bool = true;
 
     // zbullet_c_cpp.addIncludePath(.{ .path = thisDir() ++ "/libs/cbullet" });
-    llvm_wrap_c.addIncludePath(.{ .path = thisDir() ++ "/src" });
     llvm_wrap_c.linkLibC();
     llvm_wrap_c.linkLibCpp();
     {
@@ -72,7 +73,9 @@ pub fn package(
     var lib_iter = std.mem.splitScalar(u8, std.mem.trim(u8, llvm_libs, &std.ascii.whitespace), ' ');
     while (lib_iter.next()) |v| {
         if (std.mem.startsWith(u8, v, "-I")) {
-            try llvm_args.append(v);
+            //try llvm_args.append(v);
+            // llvm_wrap_c.addIncludePath(.{ .path = v[2..] });
+            llvm_wrap.addIncludePath(.{ .path = v[2..] });
         }
     }
 
