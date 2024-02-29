@@ -37,6 +37,9 @@ pub fn package(
     // const link_dynamic: bool = true;
 
     // zbullet_c_cpp.addIncludePath(.{ .path = thisDir() ++ "/libs/cbullet" });
+    llvm_wrap_c.addIncludePath(.{ .path = thisDir() ++ "/src" });
+    llvm_wrap.addIncludePath(.{ .path = thisDir() ++ "/src" });
+
     llvm_wrap_c.linkLibC();
     llvm_wrap_c.linkLibCpp();
     {
@@ -73,16 +76,15 @@ pub fn package(
     var lib_iter = std.mem.splitScalar(u8, std.mem.trim(u8, llvm_libs, &std.ascii.whitespace), ' ');
     while (lib_iter.next()) |v| {
         if (std.mem.startsWith(u8, v, "-I")) {
-            //try llvm_args.append(v);
-            // llvm_wrap_c.addIncludePath(.{ .path = v[2..] });
             llvm_wrap.addIncludePath(.{ .path = v[2..] });
+            llvm_wrap_c.addIncludePath(.{ .path = v[2..] });
         }
     }
 
     // TODO: Use the old damping method for now otherwise there is a hang in powf().
     llvm_wrap_c.addCSourceFiles(.{
         .files = &.{
-            thisDir() ++ "/src/llvm_wrap.c",
+            thisDir() ++ "/src/llvm_wrap.cpp",
         },
         .flags = llvm_args.items,
     });

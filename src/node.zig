@@ -94,6 +94,10 @@ pub const Node = struct {
                     std.debug.print("  trailing_block: {}-{}\n", .{ blk.start, blk.start + blk.len });
                 }
             },
+            .subscript => |sub| {
+                std.debug.print("  expr: {}-{}\n", .{ sub.expr.file, sub.expr.index });
+                std.debug.print("  sub: {}-{}\n", .{ sub.sub.file, sub.sub.index });
+            },
             .if_expr => |expr| {
                 std.debug.print("  cond: {}-{}\n", .{ expr.cond.file, expr.cond.index });
                 if (expr.captures) |capt| {
@@ -250,6 +254,10 @@ pub const NodeKind = union(enum) {
         args: NodeRange,
         trailing_block: ?NodeRange,
     },
+    subscript: struct {
+        expr: NodeId,
+        sub: NodeId,
+    },
 
     if_expr: struct {
         cond: NodeId,
@@ -335,6 +343,7 @@ pub const Operator = enum {
     shiftright,
 
     invoke,
+    subscript,
     ref,
     opt,
 
@@ -376,6 +385,7 @@ pub const Operator = enum {
             .double_left => .shiftright,
 
             .open_paren => .invoke,
+            .open_bracket => .subscript,
             .ampersand, .mut => .ref,
             .question => .opt,
 

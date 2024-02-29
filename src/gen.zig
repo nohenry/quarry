@@ -23,6 +23,11 @@ pub const FunctionState = struct {
     loop_done_block: ?ir.LLVMBasicBlockRef = null,
 };
 
+pub const StoreOperation = union(enum) {
+    store,
+    memcpy: usize,
+};
+
 pub const CodeGenerator = struct {
     arena: std.mem.Allocator,
     analyzer: *const analyze.Analyzer,
@@ -30,6 +35,9 @@ pub const CodeGenerator = struct {
     typechecker: *const typecheck.TypeChecker,
 
     module: ir.LLVMModuleRef,
+    target: ir.LLVMTargetRef,
+    target_machine: ir.LLVMTargetMachineRef,
+    target_data: ir.LLVMTargetDataRef,
 
     globals: std.AutoHashMap(node.NodeId, ir.LLVMValueRef),
     value_map: std.ArrayList(std.AutoHashMap(node.NodeId, ir.LLVMValueRef)),
@@ -38,6 +46,7 @@ pub const CodeGenerator = struct {
     llvm_ty_hint: ?ir.LLVMTypeRef = null,
     current_function: ?FunctionState = null,
     make_ref: bool = false,
+    store_op: StoreOperation = .store,
 
     builder: ir.LLVMBuilderRef,
 
@@ -51,13 +60,43 @@ pub const CodeGenerator = struct {
         allocator: std.mem.Allocator,
     ) Self {
         const module = ir.LLVMModuleCreateWithName(@as(cstr, "Foo"));
+        ir.LLVM_InitializeAllTargets();
+        ir.LLVM_InitializeAllTargetInfos();
+        ir.LLVM_InitializeAllAsmParsers();
+        ir.LLVM_InitializeAllAsmPrinters();
+        ir.LLVM_InitializeAllDisassemblers();
+        ir.LLVM_InitializeAllTargetMCs();
+
+        const target_triple: [*:0]u8 = ir.LLVMGetDefaultTargetTriple();
+        std.log.info("Using target triple: {s}", .{target_triple});
+        var target: ir.LLVMTargetRef = undefined;
+        var err: [*:0]u8 = undefined;
+        if (ir.LLVMGetTargetFromTriple(target_triple, &target, @ptrCast(&err)) == 1) {
+            std.log.err("Error getting target: {s}", .{err});
+        }
+
+        const target_machine = ir.LLVMCreateTargetMachine(
+            target,
+            target_triple,
+            ir.LLVMGetHostCPUName(),
+            ir.LLVMGetHostCPUFeatures(),
+            ir.LLVMCodeGenLevelNone,
+            ir.LLVMRelocDefault,
+            ir.LLVMCodeModelDefault,
+        );
+        const target_data = ir.LLVMCreateTargetDataLayout(target_machine);
 
         return .{
             .arena = arena,
             .analyzer = analyzer,
             .evaluator = evaluator,
             .typechecker = typechecker,
+
             .module = module,
+            .target = target,
+            .target_machine = target_machine,
+            .target_data = target_data,
+
             .globals = std.AutoHashMap(node.NodeId, ir.LLVMValueRef).init(allocator),
             .value_map = std.ArrayList(std.AutoHashMap(node.NodeId, ir.LLVMValueRef)).init(allocator),
             .builder = ir.LLVMCreateBuilder(),
@@ -85,6 +124,16 @@ pub const CodeGenerator = struct {
             std.log.err("Error verifying module: {s}", .{err});
         }
 
+        if (ir.LLVMTargetMachineEmitToFile(
+            self.target_machine,
+            self.module,
+            @as(cstr, "out.o"),
+            ir.LLVMObjectFile,
+            @ptrCast(&err),
+        ) == 1) {
+            std.log.err("Error writint to object file: {s}", .{err});
+        }
+
         const res = ir.LLVMPrintModuleToFile(self.module, @as(cstr, "out.ll"), @ptrCast(&err));
         std.debug.assert(res == 0);
     }
@@ -98,7 +147,7 @@ pub const CodeGenerator = struct {
                 try fn_name_writer.writeAll(path.segments[0]);
 
                 for (path.segments[1..]) |seg| {
-                    try fn_name_writer.writeByte('.');
+                    try fn_name_writer.writeByte('_');
                     try fn_name_writer.writeAll(seg);
                 }
             }
@@ -135,6 +184,9 @@ pub const CodeGenerator = struct {
 
         ir.LLVMPositionBuilderAtEnd(self.builder, alloc_block);
         _ = ir.LLVMBuildBr(self.builder, start_block);
+
+        // const attr = ir.LLVMCreateEnumAttribute(ir.LLVMGetGlobalContext(), 10, 1);
+        // ir.LLVMAddAttributeAtIndex(llvm_func, 1, attr);
 
         return llvm_func;
     }
@@ -240,13 +292,22 @@ pub const CodeGenerator = struct {
                 const ty = self.typechecker.declared_types.getEntry(info.node) orelse @panic("No declared type");
                 const llty = try self.genType(ty.value_ptr.*);
                 const llval = try self.genWithTypeHint(ty.value_ptr.*, genInstr, .{ self, info.value }) orelse @panic("no init");
+                const store_op = self.store_op;
+                self.store_op = .store;
 
                 if (self.current_function) |cfunc| {
                     const current_block = ir.LLVMGetInsertBlock(self.builder);
                     ir.LLVMPositionBuilderAtEnd(self.builder, cfunc.alloc_block);
                     const alloc_value = ir.LLVMBuildAlloca(self.builder, llty, @as(cstr, ""));
                     ir.LLVMPositionBuilderAtEnd(self.builder, current_block);
-                    _ = ir.LLVMBuildStore(self.builder, llval, alloc_value);
+                    switch (store_op) {
+                        .store => {
+                            _ = ir.LLVMBuildStore(self.builder, llval, alloc_value);
+                        },
+                        .memcpy => |size| {
+                            _ = ir.LLVMBuildMemCpy(self.builder, alloc_value, 8, llval, 8, ir.LLVMConstInt(ir.LLVMInt64Type(), size, 0));
+                        },
+                    }
 
                     try self.value_map.items[self.value_map.items.len - 1].put(info.node, alloc_value);
 
@@ -405,6 +466,36 @@ pub const CodeGenerator = struct {
 
                 return result;
             },
+            .subscript => |sub| blk: {
+                var ll_expr = try self.genWithRef(true, genInstr, .{ self, sub.expr }) orelse @panic("Unable to get subscript expression!");
+
+                const ll_sub = try self.genWithTypeHint(self.typechecker.interner.uintTy(64), genInstr, .{ self, sub.sub }) orelse @panic("Unable to get subscript sub!");
+
+                const node_id = self.evaluator.instr_to_node.get(sub.expr) orelse @panic("Unable to get node id of subscript expression");
+                var node_ty = self.typechecker.types.get(node_id) orelse @panic("Unable to get node type of subscript expression");
+                while (node_ty.* == .reference) {
+                    const llty_tmp = try self.genType(node_ty);
+                    ll_expr = ir.LLVMBuildLoad2(self.builder, llty_tmp, ll_expr, @as(cstr, ""));
+                    node_ty = node_ty.reference.base;
+                }
+                const llty = try self.genType(node_ty);
+
+                switch (node_ty.*) {
+                    .array => |arr_ty| {
+                        const value = ir.LLVMBuildZExtOrBitCast(self.builder, ll_sub, ir.LLVMInt64Type(), @as(cstr, ""));
+                        var indicies = [2]ir.LLVMValueRef{ ir.LLVMConstInt(ir.LLVMInt64Type(), 0, 0), value };
+
+                        const ptr = ir.LLVMBuildInBoundsGEP2(self.builder, llty, ll_expr, @ptrCast(&indicies), @intCast(indicies.len), @as(cstr, ""));
+                        if (self.make_ref) {
+                            break :blk ptr;
+                        } else {
+                            const ll_base = try self.genType(arr_ty.base);
+                            break :blk ir.LLVMBuildLoad2(self.builder, ll_base, ptr, @as(cstr, ""));
+                        }
+                    },
+                    else => @panic("Unimplemnted type for subscirpt"),
+                }
+            },
             .if_expr => |expr| {
                 const func = if (self.current_function) |*func| func else @panic("Expected function!!");
                 const old_cf = func.control_flow_terminated;
@@ -493,6 +584,10 @@ pub const CodeGenerator = struct {
                 const global_value = ir.LLVMAddGlobal(self.module, llarrty, @as(cstr, ""));
                 ir.LLVMSetGlobalConstant(global_value, 1);
                 ir.LLVMSetInitializer(global_value, arr_value);
+
+                // const size = ir.LLVMSizeOf(llty);
+                const size = ir.LLVMStoreSizeOfType(self.target_data, llarrty);
+                self.store_op = .{ .memcpy = size };
 
                 break :blk global_value;
             },

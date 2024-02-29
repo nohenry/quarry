@@ -85,6 +85,10 @@ pub const Instruction = struct {
                 std.debug.print("  expr: {}-{}\n", .{ inv.expr.file, inv.expr.index });
                 std.debug.print("  arguments: {}-{}\n", .{ inv.args.start, inv.args.start + inv.args.len });
             },
+            .subscript => |sub| {
+                std.debug.print("  expr: {}-{}\n", .{ sub.expr.file, sub.expr.index });
+                std.debug.print("  sub: {}-{}\n", .{ sub.sub.file, sub.sub.index });
+            },
             .reference => |expr| {
                 std.debug.print("  expr: {}-{}\n", .{ expr.expr.file, expr.expr.index });
             },
@@ -151,6 +155,10 @@ pub const InstructionKind = union(enum) {
     invoke: struct {
         expr: InstructionId,
         args: InstructionRange,
+    },
+    subscript: struct {
+        expr: InstructionId,
+        sub: InstructionId,
     },
     reference: struct {
         expr: InstructionId,
@@ -953,6 +961,21 @@ pub const Evaluator = struct {
                             .start = @truncate(starti),
                             .len = @truncate(self.instruction_ranges.items.len - starti),
                         },
+                    },
+                });
+            },
+            .subscript => |sub| blk: {
+                if (self.eval_const) {
+                    @panic("TODO");
+                }
+
+                const expr_id = try self.evalNode(sub.expr) orelse @panic("Unable to get subscript expression");
+                const sub_id = try self.evalNode(sub.sub) orelse @panic("Unable to get subscript sub expression");
+
+                break :blk try self.createInstruction(.{
+                    .subscript = .{
+                        .expr = expr_id,
+                        .sub = sub_id,
                     },
                 });
             },

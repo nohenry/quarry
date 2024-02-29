@@ -498,6 +498,10 @@ pub const Analyzer = struct {
                     }
                 }
             },
+            .subscript => |sub| {
+                try self.analyzeNode(sub.expr);
+                try self.analyzeNode(sub.sub);
+            },
             .if_expr => |expr| {
                 try self.analyzeNode(expr.cond);
                 // @TODO: Implement captures

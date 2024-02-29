@@ -1,6 +1,7 @@
 
 let main = (int8 argc) int8 {
-    int8 mut i = 23
-    int64& p = argc.&
-    0
+    [int8: 4] a = [1, 2, 3, 4]
+    [int8: 4]& i = a.&
+    int8 f = i[2].&.*
+    f
 }

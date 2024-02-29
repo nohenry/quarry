@@ -49,6 +49,13 @@ pub const BaseType = union(enum) {
         }
         return self.*.type;
     }
+
+    pub fn unwrapToRefBase(self: Type) Type {
+        return switch (self.*) {
+            .reference => |rf| rf.base.unwrapToRefBase(),
+            else => self,
+        };
+    }
 };
 
 pub const MultiType = struct { start: u32, len: u32 };
@@ -759,6 +766,26 @@ pub const TypeChecker = struct {
                     ty
                 else
                     self.interner.unitTy();
+            },
+            .subscript => |sub| blk: {
+                var expr_ty = try self.typeCheckNode(sub.expr);
+                const sub_ty = try self.typeCheckNode(sub.sub);
+                switch (sub_ty.*) {
+                    .int, .uint, .int_literal => {},
+                    else => {
+                        std.log.err("Expected integer type for subscript!", .{});
+                    },
+                }
+
+                expr_ty = expr_ty.unwrapToRefBase();
+
+                break :blk switch (expr_ty.*) {
+                    .array => |arr| arr.base,
+                    else => {
+                        std.log.err("Tried to subscript non subsciptable type! Expected array, slice, or indexable reference", .{});
+                        break :blk self.interner.unitTy();
+                    },
+                };
             },
             .if_expr => |expr| blk: {
                 const cond_ty = try self.typeCheckNode(expr.cond);

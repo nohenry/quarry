@@ -173,10 +173,13 @@ pub const Parser = struct {
             });
         }
 
-        var tok = self.peek();
+        var tok = self.peekNoNL();
         while (tok != null) : (tok = self.peek()) {
             const op = node.Operator.fromTokenKind(tok.?.kind) orelse break;
             if (postPrec(op) < last_prec) break;
+
+            self.lexer.resync();
+            tok = self.peekNoNL();
 
             switch (tok.?.kind) {
                 .open_paren => {
@@ -207,6 +210,19 @@ pub const Parser = struct {
                             .expr = left,
                             .args = args,
                             .trailing_block = trailing_block,
+                        },
+                    });
+                },
+                .open_bracket => {
+                    // parseSubscript
+                    _ = self.next();
+                    const sub = try self.parseExpr();
+                    _ = try self.expect(.close_bracket);
+
+                    left = try self.createNode(.{
+                        .subscript = .{
+                            .expr = left,
+                            .sub = sub,
                         },
                     });
                 },
