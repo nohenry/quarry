@@ -85,6 +85,12 @@ pub const Instruction = struct {
                 std.debug.print("  expr: {}-{}\n", .{ inv.expr.file, inv.expr.index });
                 std.debug.print("  arguments: {}-{}\n", .{ inv.args.start, inv.args.start + inv.args.len });
             },
+            .reference => |expr| {
+                std.debug.print("  expr: {}-{}\n", .{ expr.expr.file, expr.expr.index });
+            },
+            .dereference => |expr| {
+                std.debug.print("  expr: {}-{}\n", .{ expr.expr.file, expr.expr.index });
+            },
             .if_expr => |expr| {
                 std.debug.print("  cond: {}-{}\n", .{ expr.cond.file, expr.cond.index });
                 // if (expr.captures) |capt| {
@@ -145,6 +151,12 @@ pub const InstructionKind = union(enum) {
     invoke: struct {
         expr: InstructionId,
         args: InstructionRange,
+    },
+    reference: struct {
+        expr: InstructionId,
+    },
+    dereference: struct {
+        expr: InstructionId,
     },
 
     if_expr: struct {
@@ -689,6 +701,7 @@ pub const Evaluator = struct {
                                 if (instructions.len > 0) {
                                     const last_instr = self.instruction_ranges.items[instructions.start + instructions.len - 1];
                                     const last_node = self.node_ranges[func.block.start + func.block.len - 1];
+                                    std.log.info("Node: {}", .{last_node});
                                     const last_instr_ty = self.typechecker.types.getEntry(last_node) orelse @panic("Unable to get type entry for last instructino!");
                                     const fn_ret_ty = ty.func.ret_ty;
                                     //
@@ -771,6 +784,30 @@ pub const Evaluator = struct {
                         .node = id,
                         .tags = bind.tags,
                         .value = instruction,
+                    },
+                });
+            },
+            .reference => |expr| blk: {
+                if (self.eval_const) {
+                    @panic("Unimplemented");
+                }
+
+                const value = try self.evalNode(expr.expr) orelse @panic("Invalid operand");
+                break :blk try self.createInstruction(.{
+                    .reference = .{
+                        .expr = value,
+                    },
+                });
+            },
+            .dereference => |expr| blk: {
+                if (self.eval_const) {
+                    @panic("Unimplemented");
+                }
+
+                const value = try self.evalNode(expr.expr) orelse @panic("Invalid operand");
+                break :blk try self.createInstruction(.{
+                    .dereference = .{
+                        .expr = value,
                     },
                 });
             },

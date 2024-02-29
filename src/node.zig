@@ -119,6 +119,12 @@ pub const Node = struct {
                     std.debug.print("  finally_block: {}-{}\n", .{ block.start, block.start + block.len });
                 }
             },
+            .reference => |ref| {
+                std.debug.print("  expr: {}-{}\n", .{ ref.expr.file, ref.expr.index });
+            },
+            .dereference => |ref| {
+                std.debug.print("  expr: {}-{}\n", .{ ref.expr.file, ref.expr.index });
+            },
             .const_expr => |cexpr| {
                 std.debug.print("  expr: {}-{}\n", .{ cexpr.expr.file, cexpr.expr.index });
             },
@@ -259,6 +265,12 @@ pub const NodeKind = union(enum) {
         else_block: ?NodeRange,
         finally_block: ?NodeRange,
     },
+    reference: struct {
+        expr: NodeId,
+    },
+    dereference: struct {
+        expr: NodeId,
+    },
     const_expr: struct { expr: NodeId },
     const_block: struct { block: NodeRange },
 
@@ -326,6 +338,9 @@ pub const Operator = enum {
     ref,
     opt,
 
+    deref,
+    take_ref,
+
     assign,
     plus_eq,
     minus_eq,
@@ -363,6 +378,9 @@ pub const Operator = enum {
             .open_paren => .invoke,
             .ampersand, .mut => .ref,
             .question => .opt,
+
+            .dot_ampersand => .take_ref,
+            .dot_star => .deref,
 
             .assign => .assign,
             .plus_eq => .plus_eq,

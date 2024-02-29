@@ -123,16 +123,21 @@ pub const Lexer = struct {
     }
 
     pub fn resync(self: *Self) void {
+        self.resyncN(1);
+    }
+
+    pub fn resyncN(self: *Self, n: usize) void {
         if (self.peek_buff != null) {
             self.peek_buff = null;
-            var i = self.source_info.items.len - 2;
+            var i = self.source_info.items.len - 1 - n;
             var src_info = self.source_info.items[i];
             while (src_info.len == 1 and self.source[src_info.position] == '\n') : (src_info = self.source_info.items[i]) {
                 i -= 1;
             }
             self.position = src_info.position + src_info.len;
         } else {
-            const src_info = self.source_info.getLast();
+            const i = self.source_info.items.len - n;
+            const src_info = self.source_info.items[i];
             self.position = src_info.position + src_info.len;
         }
     }

@@ -181,7 +181,19 @@ pub const CodeGenerator = struct {
                 const param_index = scope.kind.local.parameter;
                 if (param_index) |ind| {
                     if (self.current_function) |*func| {
-                        return ir.LLVMGetParam(func.llvm_val, @intCast(ind));
+                        const value = ir.LLVMGetParam(func.llvm_val, @intCast(ind));
+                        if (self.make_ref) {
+                            // Lazily store params in variables when we need to take an address of them
+                            const current_block = ir.LLVMGetInsertBlock(self.builder);
+                            ir.LLVMPositionBuilderAtEnd(self.builder, func.alloc_block);
+                            const alloc_value = ir.LLVMBuildAlloca(self.builder, ir.LLVMTypeOf(value), @as(cstr, ""));
+                            ir.LLVMPositionBuilderAtEnd(self.builder, current_block);
+                            _ = ir.LLVMBuildStore(self.builder, value, alloc_value);
+
+                            return alloc_value;
+                        }
+
+                        return value;
                     }
                 }
 
@@ -484,6 +496,23 @@ pub const CodeGenerator = struct {
 
                 break :blk global_value;
             },
+            .reference => |ref| blk: {
+                const value = try self.genWithRef(true, genInstr, .{ self, ref.expr });
+                break :blk value;
+            },
+            .dereference => |ref| blk: {
+                // const value = try self.genInstr(ref.expr) orelse @panic("Unable to get dereference value");
+                const value = try self.genWithRef(false, genInstr, .{ self, ref.expr }) orelse @panic("Unable to get dereference value");
+                // @TODO: check if we need to do anything special for make ref (i dont think so)
+                if (self.make_ref) {
+                    break :blk value;
+                }
+                const node_id = self.evaluator.instr_to_node.get(instr_id) orelse @panic("Unable to get node id of invoke");
+                const node_ty = self.typechecker.types.get(node_id) orelse @panic("Unable to get node type");
+                const llvm_ty = try self.genType(node_ty);
+
+                break :blk ir.LLVMBuildLoad2(self.builder, llvm_ty, value, @as(cstr, ""));
+            },
             //
             // else => {
             //     std.log.err("Unhandled instruction in codegen! {}", .{instr});
@@ -530,6 +559,10 @@ pub const CodeGenerator = struct {
             .array => |arr_ty| blk: {
                 const ll_base = try self.genType(arr_ty.base);
                 break :blk ir.LLVMArrayType2(ll_base, arr_ty.size);
+            },
+            .reference => |ref| blk: {
+                const ll_base = try self.genType(ref.base);
+                break :blk ir.LLVMPointerType(ll_base, 0);
             },
             .func => |fn_ty| blk: {
                 var llvm_param_tys = std.ArrayList(ir.LLVMTypeRef).init(self.arena);

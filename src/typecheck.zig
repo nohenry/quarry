@@ -42,6 +42,13 @@ pub const BaseType = union(enum) {
         params: Type,
         ret_ty: ?Type,
     },
+
+    pub fn unwrapType(self: Type) Type {
+        if (self.* != .type) {
+            std.log.err("Expected type but found value!", .{});
+        }
+        return self.*.type;
+    }
 };
 
 pub const MultiType = struct { start: u32, len: u32 };
@@ -447,6 +454,7 @@ pub const TypeChecker = struct {
     types: std.AutoHashMap(node.NodeId, Type),
     declared_types: std.AutoHashMap(node.NodeId, Type),
 
+    last_ref: ?node.NodeId = null,
     evaluator: *eval.Evaluator = undefined,
     greedy_symbols: bool = false,
 
@@ -534,8 +542,11 @@ pub const TypeChecker = struct {
                 if (declared_ty != null) {
                     if (!self.coerceNode(value.value, ty, declared_ty.?)) {
                         std.log.err("Type of initial value does not match variable type! Types: ", .{});
-                        self.interner.printTy(ty);
+                        std.debug.print("Declared type:\n  ", .{});
                         self.interner.printTy(declared_ty.?);
+                        std.debug.print("\nInitial value type:\n  ", .{});
+                        self.interner.printTy(ty);
+                        std.debug.print("\n", .{});
                     }
                     try self.declared_types.put(node_id, declared_ty.?);
                 } else {
@@ -555,11 +566,13 @@ pub const TypeChecker = struct {
                     std.log.err("Node ref didn't exist!", .{});
                     break :blk self.interner.unitTy();
                 };
+                self.last_ref = ref_node;
                 if (self.types.get(ref_node)) |ty| break :blk ty;
                 if (self.declared_types.get(ref_node)) |ty| break :blk ty;
 
                 std.log.info("Note: Identifier reference hasn't been checked yet. Doing this manually (Is this fine?)'", .{});
                 _ = try self.typeCheckNode(ref_node);
+                self.last_ref = ref_node;
 
                 if (self.types.get(ref_node)) |ty| break :blk ty;
                 if (self.declared_types.get(ref_node)) |ty| break :blk ty;
@@ -827,6 +840,27 @@ pub const TypeChecker = struct {
 
                 break :blk self.interner.unitTy();
             },
+            .reference => |expr| blk: {
+                const base = try self.typeCheckNode(expr.expr);
+                const ref_ty = self.declared_types.get(self.last_ref.?) orelse @panic("Unable to get declared type");
+
+                const mutable = if (ref_ty.* == .reference) ref_ty.reference.mut else blk1: {
+                    // Case when taking reference of actual variable
+                    const ref_path = self.analyzer.node_to_path.getEntry(self.last_ref.?) orelse @panic("Unable to get ref path");
+                    const ref_scope = self.analyzer.getScopeFromPath(ref_path.value_ptr.*) orelse @panic("Uanble to get ref scope");
+                    break :blk1 ref_scope.kind.local.mutable;
+                };
+
+                break :blk self.interner.referenceTy(base, mutable);
+            },
+            .dereference => |expr| blk: {
+                const base = try self.typeCheckNode(expr.expr);
+                if (base.* != .reference) {
+                    std.log.err("Tried to dereference non pointer type!", .{});
+                }
+
+                break :blk base.reference.base;
+            },
             .const_expr => |expr| try self.typeCheckNode(expr.expr),
             .const_block => |expr| blk: {
                 const nodes = self.nodesRange(expr.block);
@@ -940,7 +974,7 @@ pub const TypeChecker = struct {
                     }
                 }
 
-                break :blk self.interner.recordTy(backing_field_ty, fields);
+                break :blk self.interner.typeTy(self.interner.recordTy(backing_field_ty, fields));
             },
             .type_union => |uni| blk: {
                 const backing_field_ty = if (uni.backing_field) |f|
@@ -983,19 +1017,19 @@ pub const TypeChecker = struct {
                     }
                 }
 
-                break :blk self.interner.unionTy(backing_field_ty, variants);
+                break :blk self.interner.typeTy(self.interner.unionTy(backing_field_ty, variants));
             },
             .type_ref => |ty| blk: {
                 const base_ty = try self.typeCheckNode(ty.ty);
-                break :blk self.interner.referenceTy(base_ty, ty.mut);
+                break :blk self.interner.typeTy(self.interner.referenceTy(base_ty.unwrapType(), ty.mut));
             },
             .type_opt => |ty| blk: {
                 const base_ty = try self.typeCheckNode(ty.ty);
-                break :blk self.interner.optionalTy(base_ty);
+                break :blk self.interner.typeTy(self.interner.optionalTy(base_ty));
             },
             .type_alias => |id| blk: {
                 const original_ty = try self.typeCheckNode(id);
-                break :blk self.interner.aliasTy(original_ty);
+                break :blk self.interner.typeTy(self.interner.aliasTy(original_ty));
             },
             .type_int => |size| blk: {
                 if (size == 0) {
@@ -1049,6 +1083,10 @@ pub const TypeChecker = struct {
             },
             .array => |farr| switch (to.*) {
                 .array => |tarr| farr.size == tarr.size and canCoerce(farr.base, tarr.base),
+                else => false,
+            },
+            .reference => |fref| switch (to.*) {
+                .reference => |tref| !(!fref.mut and tref.mut) and canCoerce(fref.base, tref.base),
                 else => false,
             },
             else => false,

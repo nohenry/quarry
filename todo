@@ -1,5 +1,5 @@
-[-] Arrays
-[-] Pointers
+[x] Arrays
+[x] Pointers
 [-] Slices
 [-] Optional
 [-] Records

@@ -98,6 +98,7 @@ pub const ScopeKind = union(enum) {
     },
     local: struct {
         references: u32,
+        mutable: bool,
         parameter: ?u32,
     },
 };
@@ -283,6 +284,7 @@ pub const Analyzer = struct {
                         const this_scope = try self.pushScope(try self.segment(value.name), .{
                             .local = .{
                                 .references = 0,
+                                .mutable = value.mutable,
                                 .parameter = null,
                             },
                         });
@@ -338,6 +340,7 @@ pub const Analyzer = struct {
                     .local = .{
                         .references = 0,
                         .parameter = self.param_index,
+                        .mutable = false,
                     },
                 });
                 try self.path_to_node.put(this_scope.path, index);
@@ -539,6 +542,8 @@ pub const Analyzer = struct {
                     }
                 }
             },
+            .reference => |expr| try self.analyzeNode(expr.expr),
+            .dereference => |expr| try self.analyzeNode(expr.expr),
             .const_expr => |expr| {
                 try self.analyzeNode(expr.expr);
             },

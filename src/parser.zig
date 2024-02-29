@@ -112,7 +112,7 @@ pub const Parser = struct {
                     self.lexer.resync();
                 }
 
-                break :blk if (self.nextIsNoNL(.identifier))
+                break :blk if (self.nextIsNoNL(.identifier) or self.nextIsNoNL(.mut))
                     self.parseBindingWithType(expr)
                 else
                     expr;
@@ -220,8 +220,36 @@ pub const Parser = struct {
             if (postPrec(op) < last_prec) break;
 
             switch (tok.?.kind) {
+                .dot_ampersand => {
+                    left = try self.createNodeAndNext(.{
+                        .reference = .{
+                            .expr = left,
+                        },
+                    });
+                },
+                .dot_star => {
+                    left = try self.createNodeAndNext(.{
+                        .dereference = .{
+                            .expr = left,
+                        },
+                    });
+                },
+                else => break,
+            }
+        }
+
+        tok = self.peek();
+        while (tok != null) : (tok = self.peek()) {
+            const op = node.Operator.fromTokenKind(tok.?.kind) orelse break;
+            if (postPrec(op) < last_prec) break;
+
+            switch (tok.?.kind) {
                 .mut => {
                     _ = self.next();
+                    if (!self.nextIs(.ampersand)) {
+                        self.lexer.resyncN(2);
+                        break;
+                    }
                     _ = try self.expect(.ampersand);
 
                     left = try self.createNode(.{
@@ -873,6 +901,8 @@ fn postPrec(op: node.Operator) u8 {
         .invoke => 85,
         .ref => 81,
         .opt => 81,
+
+        .deref, .take_ref => 81,
         else => 0,
     };
 }
