@@ -11,6 +11,14 @@
             "program": "${workspaceFolder}/zig-out/bin/quarry",
             "args": [],
             "cwd": "${workspaceFolder}"
-        }
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug a",
+            "program": "${workspaceFolder}/a.out",
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
     ]
 }

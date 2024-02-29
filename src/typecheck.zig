@@ -547,7 +547,11 @@ pub const TypeChecker = struct {
                 const ty = try self.typeCheckNode(value.value);
 
                 if (declared_ty != null) {
-                    if (!self.coerceNode(value.value, ty, declared_ty.?)) {
+                    if (canCoerce(ty, declared_ty.?)) {
+                        if (!self.types.contains(value.value)) {
+                            try self.types.put(value.value, declared_ty.?);
+                        }
+                    } else {
                         std.log.err("Type of initial value does not match variable type! Types: ", .{});
                         std.debug.print("Declared type:\n  ", .{});
                         self.interner.printTy(declared_ty.?);
@@ -781,6 +785,7 @@ pub const TypeChecker = struct {
 
                 break :blk switch (expr_ty.*) {
                     .array => |arr| arr.base,
+                    .slice => |slice| slice.base,
                     else => {
                         std.log.err("Tried to subscript non subsciptable type! Expected array, slice, or indexable reference", .{});
                         break :blk self.interner.unitTy();
@@ -1110,9 +1115,14 @@ pub const TypeChecker = struct {
             },
             .array => |farr| switch (to.*) {
                 .array => |tarr| farr.size == tarr.size and canCoerce(farr.base, tarr.base),
+                .slice => |tslice| canCoerce(farr.base, tslice.base),
                 else => false,
             },
             .reference => |fref| switch (to.*) {
+                .slice => |tslice| switch (fref.base.*) {
+                    .array => |farr| !(!fref.mut and tslice.mut) and canCoerce(farr.base, tslice.base),
+                    else => false,
+                },
                 .reference => |tref| !(!fref.mut and tref.mut) and canCoerce(fref.base, tref.base),
                 else => false,
             },

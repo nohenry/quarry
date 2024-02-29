@@ -151,8 +151,13 @@ pub const Parser = struct {
     }
 
     pub fn parseBinExpr(self: *Self, last_prec: u8) ParseError!node.NodeId {
-        var left = try self.parsePrimaryExpr();
+        return self.parseBinExprWithLeft(try self.parsePrimaryExpr(), last_prec);
+    }
+
+    pub fn parseBinExprWithLeft(self: *Self, left_id: node.NodeId, last_prec: u8) ParseError!node.NodeId {
+        var left = left_id;
         // var next_last_prec = last_prec;
+        left = try self.parsePostExpr(last_prec, left);
 
         while (true) {
             const op_tok = self.lexer.peek() orelse break;
@@ -172,6 +177,12 @@ pub const Parser = struct {
                 },
             });
         }
+
+        return left;
+    }
+
+    pub fn parsePostExpr(self: *Self, last_prec: u8, left_id: node.NodeId) !node.NodeId {
+        var left = left_id;
 
         var tok = self.peekNoNL();
         while (tok != null) : (tok = self.peek()) {
@@ -291,7 +302,6 @@ pub const Parser = struct {
                 else => break,
             }
         }
-
         return left;
     }
 

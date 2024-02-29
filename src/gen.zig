@@ -124,6 +124,9 @@ pub const CodeGenerator = struct {
             std.log.err("Error verifying module: {s}", .{err});
         }
 
+        const res = ir.LLVMPrintModuleToFile(self.module, @as(cstr, "out.ll"), @ptrCast(&err));
+        std.debug.assert(res == 0);
+
         if (ir.LLVMTargetMachineEmitToFile(
             self.target_machine,
             self.module,
@@ -133,9 +136,6 @@ pub const CodeGenerator = struct {
         ) == 1) {
             std.log.err("Error writint to object file: {s}", .{err});
         }
-
-        const res = ir.LLVMPrintModuleToFile(self.module, @as(cstr, "out.ll"), @ptrCast(&err));
-        std.debug.assert(res == 0);
     }
 
     pub fn genFuncProto(self: *Self, bind_id: node.NodeId, func: eval.FunctionValue) !ir.LLVMValueRef {
@@ -290,10 +290,23 @@ pub const CodeGenerator = struct {
             },
             .binding => |info| blk: {
                 const ty = self.typechecker.declared_types.getEntry(info.node) orelse @panic("No declared type");
+                const val_node = self.evaluator.instr_to_node.get(info.value) orelse @panic("Uanble to get instruciton node");
+                const val_ty = self.typechecker.types.getEntry(val_node) orelse @panic("No value type");
+                const make_ref = if (ty.value_ptr.*.* == .slice and val_ty.value_ptr.*.* == .array and ty.value_ptr.*.slice.base == val_ty.value_ptr.*.array.base)
+                    true
+                else
+                    false;
+
+                const old_ref = self.make_ref;
+                errdefer self.make_ref = old_ref;
+                self.make_ref = make_ref;
+
                 const llty = try self.genType(ty.value_ptr.*);
                 const llval = try self.genWithTypeHint(ty.value_ptr.*, genInstr, .{ self, info.value }) orelse @panic("no init");
                 const store_op = self.store_op;
                 self.store_op = .store;
+
+                self.make_ref = old_ref;
 
                 if (self.current_function) |cfunc| {
                     const current_block = ir.LLVMGetInsertBlock(self.builder);
@@ -301,11 +314,29 @@ pub const CodeGenerator = struct {
                     const alloc_value = ir.LLVMBuildAlloca(self.builder, llty, @as(cstr, ""));
                     ir.LLVMPositionBuilderAtEnd(self.builder, current_block);
                     switch (store_op) {
-                        .store => {
+                        .store => blk1: {
+                            self.typechecker.interner.printTy(val_ty.value_ptr.*);
+                            self.typechecker.interner.printTy(ty.value_ptr.*);
+                            if (ty.value_ptr.*.* == .slice and val_ty.value_ptr.*.* == .array and ty.value_ptr.*.slice.base == val_ty.value_ptr.*.array.base) {
+                                var indicies = [_]ir.LLVMValueRef{
+                                    ir.LLVMConstInt(ir.LLVMInt32Type(), 0, 0),
+                                    ir.LLVMConstInt(ir.LLVMInt32Type(), 0, 0),
+                                };
+
+                                var ll_ptr = ir.LLVMBuildInBoundsGEP2(self.builder, llty, alloc_value, @ptrCast(&indicies), @intCast(indicies.len), @as(cstr, ""));
+                                _ = ir.LLVMBuildStore(self.builder, llval, ll_ptr);
+
+                                indicies[1] = ir.LLVMConstInt(ir.LLVMInt32Type(), 1, 0);
+                                ll_ptr = ir.LLVMBuildInBoundsGEP2(self.builder, llty, alloc_value, @ptrCast(&indicies), @intCast(indicies.len), @as(cstr, ""));
+                                const value = ir.LLVMConstInt(self.ptrSizedInt(), val_ty.value_ptr.*.array.size, 0);
+                                _ = ir.LLVMBuildStore(self.builder, value, ll_ptr);
+
+                                break :blk1;
+                            }
                             _ = ir.LLVMBuildStore(self.builder, llval, alloc_value);
                         },
                         .memcpy => |size| {
-                            _ = ir.LLVMBuildMemCpy(self.builder, alloc_value, 8, llval, 8, ir.LLVMConstInt(ir.LLVMInt64Type(), size, 0));
+                            _ = ir.LLVMBuildMemCpy(self.builder, alloc_value, 0, llval, 0, ir.LLVMConstInt(ir.LLVMInt64Type(), size, 0));
                         },
                     }
 
@@ -484,12 +515,38 @@ pub const CodeGenerator = struct {
                     .array => |arr_ty| {
                         const value = ir.LLVMBuildZExtOrBitCast(self.builder, ll_sub, ir.LLVMInt64Type(), @as(cstr, ""));
                         var indicies = [2]ir.LLVMValueRef{ ir.LLVMConstInt(ir.LLVMInt64Type(), 0, 0), value };
-
                         const ptr = ir.LLVMBuildInBoundsGEP2(self.builder, llty, ll_expr, @ptrCast(&indicies), @intCast(indicies.len), @as(cstr, ""));
                         if (self.make_ref) {
                             break :blk ptr;
                         } else {
                             const ll_base = try self.genType(arr_ty.base);
+                            break :blk ir.LLVMBuildLoad2(self.builder, ll_base, ptr, @as(cstr, ""));
+                        }
+                    },
+                    .slice => |slc_ty| {
+                        const base_ty = try self.genType(slc_ty.base);
+                        const str: [*:0]u8 = ir.LLVMPrintValueToString(ll_expr);
+                        std.log.info("Val: {s}", .{str});
+
+                        const value = ir.LLVMBuildZExtOrBitCast(self.builder, ll_sub, ir.LLVMInt64Type(), @as(cstr, ""));
+                        var indicies = [_]ir.LLVMValueRef{
+                            ir.LLVMConstInt(ir.LLVMInt32Type(), 0, 0),
+                            ir.LLVMConstInt(ir.LLVMInt32Type(), 0, 0),
+                        };
+
+                        var ptr = ir.LLVMBuildInBoundsGEP2(self.builder, llty, ll_expr, @ptrCast(&indicies), @intCast(indicies.len), @as(cstr, ""));
+                        ptr = ir.LLVMBuildLoad2(self.builder, ir.LLVMPointerType(base_ty, 0), ptr, @as(cstr, ""));
+
+                        // @TODO: bounds checking
+                        var next_indicies = [_]ir.LLVMValueRef{
+                            value,
+                        };
+                        ptr = ir.LLVMBuildInBoundsGEP2(self.builder, base_ty, ptr, @ptrCast(&next_indicies), @intCast(next_indicies.len), @as(cstr, ""));
+
+                        if (self.make_ref) {
+                            break :blk ptr;
+                        } else {
+                            const ll_base = try self.genType(slc_ty.base);
                             break :blk ir.LLVMBuildLoad2(self.builder, ll_base, ptr, @as(cstr, ""));
                         }
                     },
@@ -557,11 +614,26 @@ pub const CodeGenerator = struct {
             },
             .array_init => |arr| blk: {
                 const node_id = self.evaluator.instr_to_node.get(instr_id) orelse @panic("Unable to get node id of invoke");
-                const node_ty = self.typechecker.types.get(node_id) orelse @panic("Unable to get node type");
-                const base_ty = node_ty.array.base;
+                var node_ty = self.typechecker.types.get(node_id) orelse @panic("Unable to get node type");
+                var base_ty = node_ty.array.base;
 
                 var ll_vals = std.ArrayList(ir.LLVMValueRef).init(self.arena);
                 try ll_vals.ensureTotalCapacity(arr.exprs.len);
+
+                if (self.ty_hint) |ty_h| {
+                    node_ty = switch (ty_h.array.base.*) {
+                        .int,
+                        .uint,
+                        .iptr,
+                        .uptr,
+                        => switch (base_ty.*) {
+                            .int_literal => ty_h,
+                            else => node_ty,
+                        },
+                        else => node_ty,
+                    };
+                    base_ty = node_ty.array.base;
+                }
 
                 const llarrty = try self.genType(node_ty);
                 const llty = try self.genType(base_ty);
@@ -580,10 +652,14 @@ pub const CodeGenerator = struct {
                     try ll_vals.append(value);
                 }
 
+                // @TODO: do non const arrays
                 const arr_value = ir.LLVMConstArray2(llty, ll_vals.items.ptr, ll_vals.items.len);
                 const global_value = ir.LLVMAddGlobal(self.module, llarrty, @as(cstr, ""));
                 ir.LLVMSetGlobalConstant(global_value, 1);
                 ir.LLVMSetInitializer(global_value, arr_value);
+                // ir.LLVMSetAlignment(global_value, 8);
+                ir.LLVMSetLinkage(global_value, ir.LLVMPrivateLinkage);
+                ir.LLVMSetUnnamedAddr(global_value, 1);
 
                 // const size = ir.LLVMSizeOf(llty);
                 const size = ir.LLVMStoreSizeOfType(self.target_data, llarrty);
@@ -639,6 +715,10 @@ pub const CodeGenerator = struct {
         return @call(.auto, func, args);
     }
 
+    pub inline fn ptrSizedInt(self: *const Self) ir.LLVMTypeRef {
+        return ir.LLVMIntPtrType(self.target_data);
+    }
+
     pub fn genType(self: *const Self, ty: typecheck.Type) !ir.LLVMTypeRef {
         return switch (ty.*) {
             .int, .uint => |size| ir.LLVMIntType(@intCast(size)),
@@ -654,6 +734,16 @@ pub const CodeGenerator = struct {
             .array => |arr_ty| blk: {
                 const ll_base = try self.genType(arr_ty.base);
                 break :blk ir.LLVMArrayType2(ll_base, arr_ty.size);
+            },
+            .slice => |slc_ty| blk: {
+                const ll_base = try self.genType(slc_ty.base);
+                var ll_element_tys = [2]ir.LLVMTypeRef{
+                    ir.LLVMPointerType(ll_base, 0),
+                    ir.LLVMIntPtrType(self.target_data),
+                };
+                const ll_slice_ty = ir.LLVMStructType(&ll_element_tys, ll_element_tys.len, 0);
+
+                break :blk ll_slice_ty;
             },
             .reference => |ref| blk: {
                 const ll_base = try self.genType(ref.base);
