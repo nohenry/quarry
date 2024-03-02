@@ -1,4 +1,5 @@
 const std = @import("std");
+const node = @import("node.zig");
 
 pub const TokenId = usize;
 
@@ -79,17 +80,77 @@ pub const TokenKind = union(enum) {
     @"extern",
 };
 
-pub const SourceInfo = struct {
+pub const TokenSourceInfo = struct {
     position: usize,
-    len: usize,
+    line: u32,
+    // col: u32,
+    len: u32,
+};
+
+pub const SourceInfo = struct {
+    source: []const u8,
+    token_info: []const TokenSourceInfo,
+    small_lexer: Lexer,
+
+    const Self = @This();
+
+    pub fn lineRangeAt(self: *const Self, pos: usize) struct { usize, usize } {
+        var back_pos = pos;
+        while (self.source[back_pos] != '\n') : (back_pos -= 1) {}
+        var front_pos = pos;
+        while (self.source[front_pos] != '\n') : (front_pos += 1) {}
+
+        return .{ back_pos + 1, front_pos };
+    }
+
+    pub fn printRange(self: *Self, start: usize, end: usize) void {
+        self.small_lexer.position = 0;
+        self.small_lexer.source = self.source[start..end];
+        var last_pos: usize = 0;
+
+        while (self.small_lexer.next()) |tok| {
+            const color = switch (tok.kind) {
+                .int_literal, .float_literal, .bool_literal => "\x1b[33m",
+                .string_literal => "\x1b[32m",
+                .identifier => "\x1b[1;34m",
+                .comma, .colon, .assign, .arrow, .spread => "\x1b[2m",
+                .let,
+                .@"defer",
+                .@"if",
+                .@"else",
+                .finally,
+                .loop,
+                .@"const",
+                .mut,
+                .type,
+                .protocol,
+                .@"export",
+                .@"extern",
+                => "\x1b[94m",
+                .uint,
+                .int,
+                .float,
+                .bool,
+                => "\x1b[1;32m",
+                else => "",
+            };
+
+            std.debug.print("{s}{s}\x1b[0m", .{ color, self.small_lexer.source[last_pos..self.small_lexer.position] });
+            last_pos = self.small_lexer.position;
+        }
+    }
 };
 
 pub const Lexer = struct {
+    small: bool = false,
     source: []const u8,
     position: usize = 0,
     index: usize = 0,
+    line: u32 = 0,
+    col: u32 = 0,
 
-    source_info: std.ArrayList(SourceInfo),
+    tokens: std.ArrayList(Token),
+    source_info: std.ArrayList(TokenSourceInfo),
 
     peek_buff: ?Token = null,
 
@@ -97,8 +158,26 @@ pub const Lexer = struct {
 
     pub fn init(source: []const u8, allocator: std.mem.Allocator) Self {
         return .{
-            .source_info = std.ArrayList(SourceInfo).init(allocator),
+            .tokens = std.ArrayList(Token).init(allocator),
+            .source_info = std.ArrayList(TokenSourceInfo).init(allocator),
             .source = source,
+        };
+    }
+
+    pub fn initSmall(source: []const u8) Self {
+        return .{
+            .tokens = undefined,
+            .source_info = undefined,
+            .source = source,
+            .small = true,
+        };
+    }
+
+    pub fn getSourceInfo(self: *const Self) SourceInfo {
+        return .{
+            .source = self.source,
+            .token_info = self.source_info.items,
+            .small_lexer = Lexer.initSmall(self.source),
         };
     }
 
@@ -142,6 +221,10 @@ pub const Lexer = struct {
         }
     }
 
+    pub fn lastIndex(self: *const Self) TokenId {
+        return self.index;
+    }
+
     pub fn next(self: *Self) ?Token {
         if (self.peek_buff) |pk| {
             self.peek_buff = null;
@@ -156,8 +239,8 @@ pub const Lexer = struct {
             self.position += 1;
         }
         if (self.position < self.source.len and self.source[self.position] == '/' and self.source[self.position + 1] == '*') {
-            while (self.position + 1 < self.source.len and self.source[self.position] != '*' and self.source[self.position + 1] != '/') : (self.position += 1) {}
-            self.position += 1;
+            while (self.position + 1 < self.source.len and !(self.source[self.position] == '*' and self.source[self.position + 1] == '/')) : (self.position += 1) {}
+            self.position += 2;
         }
         while (self.position < self.source.len and self.source[self.position] != '\n' and std.ascii.isWhitespace(self.source[self.position])) : (self.position += 1) {}
 
@@ -167,9 +250,15 @@ pub const Lexer = struct {
 
         const c = self.source[self.position];
         const old_position = self.position;
+        const old_line = self.line;
 
         const result: struct { TokenKind, usize } = switch (c) {
-            '\n' => .{ .newline, 1 },
+            '\n' => blk: {
+                self.line += 1;
+                self.col = 0;
+
+                break :blk .{ .newline, 1 };
+            },
             ',' => .{ .comma, 1 },
             ':' => .{ .colon, 1 },
             '=' => if (self.source.len > (self.position + 1))
@@ -241,7 +330,7 @@ pub const Lexer = struct {
                     while (self.position < self.source.len and self.source[self.position] != '\n') : (self.position += 1) {}
                     self.position += 1;
                 } else if (self.source.len > (self.position + 1) and self.source[self.position + 1] == '*') {
-                    while (self.position + 1 < self.source.len and self.source[self.position] != '*' and self.source[self.position + 1] != '/') : (self.position += 1) {}
+                    while (self.position + 1 < self.source.len and !(self.source[self.position] == '*' and self.source[self.position + 1] == '/')) : (self.position += 1) {}
                     self.position += 1;
                 } else {
                     break :blk self.binAndAssign(.slash, .slash_eq, 1);
@@ -297,13 +386,24 @@ pub const Lexer = struct {
         };
 
         self.position += result[1];
-        self.source_info.append(.{
-            .position = old_position,
-            .len = self.position - old_position,
-        }) catch @panic("Memory error");
+        if (self.small and result[0] != .newline) {
+            self.col += @truncate(self.position - old_position);
+        }
+
+        if (!self.small) {
+            self.source_info.append(.{
+                .position = old_position,
+                .line = old_line,
+                .len = @truncate(self.position - old_position),
+            }) catch @panic("Memory error");
+        }
 
         const index = self.index;
         self.index += 1;
+
+        if (!self.small) {
+            self.tokens.append(.{ .id = index, .kind = result[0] }) catch @panic("Unable to push token");
+        }
 
         return .{
             .id = index,

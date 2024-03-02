@@ -5,6 +5,7 @@ const analyze = @import("analyze.zig");
 const type_check = @import("typecheck.zig");
 const eval = @import("eval.zig");
 const gen = @import("gen.zig");
+const diags = @import("diagnostics.zig");
 
 pub const std_options = .{
     .logFn = myLogFn,
@@ -39,6 +40,7 @@ pub fn myLogFn(
 
 pub fn main() !void {
     var alloc = std.heap.GeneralPurposeAllocator(.{}){};
+    var diag_arena = std.heap.ArenaAllocator.init(alloc.allocator());
 
     var file = try std.fs.cwd().openFile("test/test.qry", .{});
     defer file.close();
@@ -51,6 +53,8 @@ pub fn main() !void {
     var lexer = tokenize.Lexer.init(file_contents, alloc.allocator());
     var prsr = parser.Parser.init(alloc.allocator(), &lexer);
     const ids = try prsr.parse();
+
+    var diag = diags.Diagnostics.init(prsr.nodes.items, prsr.node_tokens.items, diag_arena.allocator());
 
     std.debug.print("File items: \n", .{});
     for (ids) |nodeId| {
@@ -79,6 +83,7 @@ pub fn main() !void {
         prsr.nodes.items,
         prsr.node_ranges.items,
         &anal,
+        &diag,
         alloc.allocator(),
         arena.allocator(),
     );
@@ -96,27 +101,36 @@ pub fn main() !void {
     try evaluator.setup();
 
     _ = try tycheck.typeCheck(ids);
-    const instrs = try evaluator.eval(ids);
 
-    std.debug.print("File items: \n", .{});
-    for (instrs) |nodeId| {
-        const instr = evaluator.instructions.items[@as(usize, nodeId.index)];
-        instr.print();
+    const instrs = if (diag.allGood())
+        try evaluator.eval(ids)
+    else
+        &[_]eval.InstructionId{};
+
+    // std.debug.print("File items: \n", .{});
+    // for (instrs) |nodeId| {
+    //     const instr = evaluator.instructions.items[@as(usize, nodeId.index)];
+    //     instr.print();
+    // }
+
+    // std.debug.print("\nInstruction Ranges: \n", .{});
+    // for (evaluator.instruction_ranges.items) |nodeId| {
+    //     const instr = evaluator.instructions.items[@as(usize, nodeId.index)];
+    //     instr.print();
+    // }
+
+    // std.debug.print("\nAll instructions: \n", .{});
+    // for (evaluator.instructions.items) |instr| {
+    //     instr.print();
+    // }
+
+    if (diag.allGood()) {
+        var code_gen = gen.CodeGenerator.init(&anal, &evaluator, &tycheck, arena.allocator(), alloc.allocator());
+        try code_gen.genInstructions(instrs);
     }
 
-    std.debug.print("\nInstruction Ranges: \n", .{});
-    for (evaluator.instruction_ranges.items) |nodeId| {
-        const instr = evaluator.instructions.items[@as(usize, nodeId.index)];
-        instr.print();
-    }
-
-    std.debug.print("\nAll instructions: \n", .{});
-    for (evaluator.instructions.items) |instr| {
-        instr.print();
-    }
-
-    var code_gen = gen.CodeGenerator.init(&anal, &evaluator, &tycheck, arena.allocator(), alloc.allocator());
-    try code_gen.genInstructions(instrs);
+    var src_info = lexer.getSourceInfo();
+    diag.dump(&src_info);
 
     arena.deinit();
 

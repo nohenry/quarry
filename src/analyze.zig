@@ -321,7 +321,7 @@ pub const Analyzer = struct {
                 }
 
                 if (self.deferred) {
-                    std.log.err("Unable to resolve symbol: `{s}``", .{str});
+                    std.log.err("Unable to resolve symbol: `{s}`", .{str});
                 } else {
                     // @TODO: dont do this for locals
                     try self.deferred_nodes.append(.{

@@ -2,6 +2,7 @@ const std = @import("std");
 const node = @import("node.zig");
 const analyze = @import("analyze.zig");
 const eval = @import("eval.zig");
+const diags = @import("diagnostics.zig");
 
 pub const BaseType = union(enum) {
     unit: void,
@@ -321,119 +322,131 @@ pub const TypeInterner = struct {
         });
     }
 
-    pub fn printTy(self: *const Self, ty: Type) void {
+    pub fn printTyToStr(self: *const Self, ty: Type, allocator: std.mem.Allocator) []const u8 {
+        var buf = std.ArrayList(u8).init(allocator);
+        const buf_writer = buf.writer();
+        self.printTyWriter(ty, buf_writer) catch @panic("Printing type failed");
+        return buf.items;
+    }
+
+    pub fn printTyWriter(self: *const Self, ty: Type, writer: anytype) !void {
         switch (ty.*) {
-            .unit => std.debug.print("unit", .{}),
-            .int_literal => std.debug.print("int_literal", .{}),
-            .float_literal => std.debug.print("float_literal", .{}),
-            .int => |size| std.debug.print("int{}", .{size}),
-            .uint => |size| std.debug.print("uint{}", .{size}),
-            .uptr => std.debug.print("uint", .{}),
-            .iptr => std.debug.print("int", .{}),
-            .float => |size| std.debug.print("float{}", .{size}),
-            .boolean => std.debug.print("boolean", .{}),
-            .str => std.debug.print("str", .{}),
+            .unit => try writer.print("unit", .{}),
+            .int_literal => try writer.print("int_literal", .{}),
+            .float_literal => try writer.print("float_literal", .{}),
+            .int => |size| try writer.print("int{}", .{size}),
+            .uint => |size| try writer.print("uint{}", .{size}),
+            .uptr => try writer.print("uint", .{}),
+            .iptr => try writer.print("int", .{}),
+            .float => |size| try writer.print("float{}", .{size}),
+            .boolean => try writer.print("boolean", .{}),
+            .str => try writer.print("str", .{}),
 
             .array => |val| {
-                std.debug.print("[", .{});
-                self.printTy(val.base);
-                std.debug.print(": {}]", .{val.size});
+                try writer.print("[", .{});
+                try self.printTyWriter(val.base, writer);
+                try writer.print(": {}]", .{val.size});
             },
             .slice => |val| {
-                std.debug.print("[", .{});
+                try writer.print("[", .{});
                 if (val.mut)
-                    std.debug.print("mut ", .{});
-                self.printTy(val.base);
-                std.debug.print("]", .{});
+                    try writer.print("mut ", .{});
+                try self.printTyWriter(val.base, writer);
+                try writer.print("]", .{});
             },
             .optional => |val| {
-                self.printTy(val.base);
-                std.debug.print("?", .{});
+                try self.printTyWriter(val.base, writer);
+                try writer.print("?", .{});
             },
             .reference => |val| {
-                self.printTy(val.base);
+                try self.printTyWriter(val.base, writer);
                 if (val.mut)
-                    std.debug.print("mut ", .{});
-                std.debug.print("&", .{});
+                    try writer.print("mut ", .{});
+                try writer.print("&", .{});
             },
             .record => |rec| {
-                std.debug.print("type", .{});
+                try writer.print("type", .{});
                 if (rec.backing_field) |field| {
-                    std.debug.print("(", .{});
-                    self.printTy(field);
-                    std.debug.print(")", .{});
+                    try writer.print("(", .{});
+                    try self.printTyWriter(field, writer);
+                    try writer.print(")", .{});
                 }
-                self.printTy(rec.fields);
+                try self.printTyWriter(rec.fields, writer);
             },
             .@"union" => |uni| {
-                std.debug.print("union", .{});
+                try writer.print("union", .{});
                 if (uni.backing_field) |field| {
-                    std.debug.print("(", .{});
-                    self.printTy(field);
-                    std.debug.print(")", .{});
+                    try writer.print("(", .{});
+                    try self.printTyWriter(field, writer);
+                    try writer.print(")", .{});
                 }
-                self.printTy(uni.variants);
+                try self.printTyWriter(uni.variants, writer);
             },
             .alias => |base| {
-                std.debug.print("type", .{});
+                try writer.print("type", .{});
                 // if (rec.backing_field) |field| {
-                //     std.debug.print("(", .{});
-                //     self.printTy(field);
-                //     std.debug.print(")", .{});
+                //     try writer.print("(", .{});
+                //     try self.printTyWriter(field, writer);
+                //     try writer.print(")", .{});
                 // }
-                std.debug.print(" ", .{});
-                self.printTy(base);
+                try writer.print(" ", .{});
+                try self.printTyWriter(base, writer);
             },
-            .named => |n| std.debug.print("{}", .{n}),
+            .named => |n| try writer.print("{}", .{n}),
             .type => |base| {
-                std.debug.print("type(", .{});
-                self.printTy(base);
-                std.debug.print(")", .{});
+                try writer.print("type(", .{});
+                try self.printTyWriter(base, writer);
+                try writer.print(")", .{});
             },
 
             .multi_type => |tys| {
-                std.debug.print("(", .{});
+                try writer.print("(", .{});
                 if (tys.len > 0) {
-                    self.printTy(tys[0]);
+                    try self.printTyWriter(tys[0], writer);
 
                     for (tys[1..]) |mty| {
-                        std.debug.print(",", .{});
-                        self.printTy(mty);
+                        try writer.print(",", .{});
+                        try self.printTyWriter(mty, writer);
                     }
                 }
-                std.debug.print(")", .{});
+                try writer.print(")", .{});
             },
             .multi_type_impl => |mty| {
-                self.printTy(&.{ .multi_type = self.multi_types.items[mty.start .. mty.start + mty.len] });
+                try self.printTyWriter(&.{ .multi_type = self.multi_types.items[mty.start .. mty.start + mty.len] }, writer);
             },
             .multi_type_keyed => |kyd| {
-                std.debug.print("[", .{});
+                try writer.print("[", .{});
                 var it = kyd.iterator();
 
                 if (it.next()) |val| {
-                    self.printTy(val.value_ptr.*);
-                    std.debug.print(" {s}", .{val.key_ptr.*});
+                    try self.printTyWriter(val.value_ptr.*, writer);
+                    try writer.print(" {s}", .{val.key_ptr.*});
                 }
                 while (it.next()) |val| {
-                    std.debug.print(", ", .{});
-                    self.printTy(val.value_ptr.*);
-                    std.debug.print(" {s}", .{val.key_ptr.*});
+                    try writer.print(", ", .{});
+                    try self.printTyWriter(val.value_ptr.*, writer);
+                    try writer.print(" {s}", .{val.key_ptr.*});
                 }
-                std.debug.print("]", .{});
+                try writer.print("]", .{});
             },
             .multi_type_keyed_impl => |ind| {
-                self.printTy(&.{ .multi_type_keyed = self.multi_types_keyed.items[ind] });
+                try self.printTyWriter(&.{ .multi_type_keyed = self.multi_types_keyed.items[ind] }, writer);
             },
             .func => |func| {
-                self.printTy(func.params);
-                std.debug.print(" ", .{});
+                try self.printTyWriter(func.params, writer);
+                try writer.print(" ", .{});
                 if (func.ret_ty) |ret| {
-                    self.printTy(ret);
+                    try self.printTyWriter(ret, writer);
                 } else {
-                    std.debug.print("none", .{});
+                    try writer.print("none", .{});
                 }
             },
         }
+    }
+
+    pub fn printTy(self: *const Self, ty: Type) void {
+        const writer = std.io.getStdOut();
+        self.printTyWriter(ty, writer.writer()) catch @panic("Error while printing");
     }
 
     inline fn createOrGetTy(self: *Self, value: BaseType) Type {
@@ -453,6 +466,7 @@ pub const TypeInterner = struct {
 pub const TypeChecker = struct {
     arena: std.mem.Allocator,
     interner: *TypeInterner,
+    d: *diags.Diagnostics,
 
     nodes: []const node.Node,
     node_ranges: []const node.NodeId,
@@ -461,6 +475,7 @@ pub const TypeChecker = struct {
     types: std.AutoHashMap(node.NodeId, Type),
     declared_types: std.AutoHashMap(node.NodeId, Type),
 
+    ty_hint: ?Type = null,
     last_ref: ?node.NodeId = null,
     evaluator: *eval.Evaluator = undefined,
     greedy_symbols: bool = false,
@@ -471,6 +486,7 @@ pub const TypeChecker = struct {
         nodes: []const node.Node,
         node_ranges: []const node.NodeId,
         analyzer: *const analyze.Analyzer,
+        diag: *diags.Diagnostics,
         allocator: std.mem.Allocator,
         arena: std.mem.Allocator,
     ) !Self {
@@ -481,6 +497,7 @@ pub const TypeChecker = struct {
         return .{
             .arena = arena,
             .interner = interner,
+            .d = diag,
             .nodes = nodes,
             .node_ranges = node_ranges,
             .analyzer = analyzer,
@@ -504,8 +521,7 @@ pub const TypeChecker = struct {
             std.debug.print("Declared Types: \n", .{});
             var it = self.declared_types.iterator();
             while (it.next()) |ty| {
-                std.debug.print("{} => ", .{ty.key_ptr.*});
-                self.interner.printTy(ty.value_ptr.*);
+                self.printTypeMap(ty.key_ptr.*, ty.value_ptr.*);
                 std.debug.print("\n", .{});
             }
         }
@@ -514,8 +530,7 @@ pub const TypeChecker = struct {
             std.debug.print("Node Types: \n", .{});
             var it = self.types.iterator();
             while (it.next()) |ty| {
-                std.debug.print("{} => ", .{ty.key_ptr.*});
-                self.interner.printTy(ty.value_ptr.*);
+                self.printTypeMap(ty.key_ptr.*, ty.value_ptr.*);
                 std.debug.print("\n", .{});
             }
         }
@@ -524,6 +539,51 @@ pub const TypeChecker = struct {
             .types = self.types,
             .declared_types = self.declared_types,
         };
+    }
+
+    fn printTypeMap(self: *const Self, node_id: node.NodeId, ty: Type) void {
+        std.debug.print("Node: ", .{});
+        printIntCol(node_id.index);
+        std.debug.print(" => ", .{});
+        self.interner.printTy(ty);
+    }
+
+    fn printIntCol(i: u32) void {
+        const alignment: u32 = 4;
+        const count = countDigits(i);
+        for (0..alignment - count) |_| {
+            std.debug.print(" ", .{});
+        }
+
+        if (i == 0)
+            std.debug.print("\x1b[41m0", .{})
+        else
+            printIntColImpl(i);
+
+        std.debug.print("\x1b[0m", .{});
+    }
+
+    fn countDigits(i: u32) u32 {
+        if (i == 0) return 1;
+        return countDigitsImpl(i);
+    }
+
+    fn countDigitsImpl(i: u32) u32 {
+        if (i == 0) return 0;
+        return 1 + countDigitsImpl(i / 10);
+    }
+
+    fn printIntColImpl(i: u32) void {
+        if (i == 0) return;
+        const ival = i % 10;
+        const bval = if (ival < 7) ival else ival + 60 - 7;
+        const fval: u32 = switch (bval + 41) {
+            47, 42, 41, 43, 101, 102, 103, 104, 105, 106, 107 => 30,
+            else => 37,
+        };
+
+        printIntColImpl(i / 10);
+        std.debug.print("\x1b[{};{}m{}", .{ fval, bval + 41, ival });
     }
 
     pub fn typeCheckNode(self: *Self, node_id: node.NodeId) !Type {
@@ -544,20 +604,17 @@ pub const TypeChecker = struct {
                     return self.interner.unitTy();
                 };
 
+                const old_hint = self.ty_hint;
+                defer self.ty_hint = old_hint;
+                self.ty_hint = declared_ty;
                 const ty = try self.typeCheckNode(value.value);
 
                 if (declared_ty != null) {
-                    if (canCoerce(ty, declared_ty.?)) {
-                        if (!self.types.contains(value.value)) {
-                            try self.types.put(value.value, declared_ty.?);
-                        }
-                    } else {
-                        std.log.err("Type of initial value does not match variable type! Types: ", .{});
-                        std.debug.print("Declared type:\n  ", .{});
-                        self.interner.printTy(declared_ty.?);
-                        std.debug.print("\nInitial value type:\n  ", .{});
-                        self.interner.printTy(ty);
-                        std.debug.print("\n", .{});
+                    if (!self.coerceNode(value.value, ty, declared_ty.?) and !canConvert(ty, declared_ty.?)) {
+                        const declared_ty_str = self.interner.printTyToStr(declared_ty.?, self.arena);
+                        const ty_str = self.interner.printTyToStr(ty, self.arena);
+
+                        self.d.addErr(node_id, "Type of initial value does not match variable type! \nDeclared type:\n  {s}\nInitial value type:\n  {s}\n", .{ declared_ty_str, ty_str }, .{});
                     }
                     try self.declared_types.put(node_id, declared_ty.?);
                 } else {
@@ -597,6 +654,23 @@ pub const TypeChecker = struct {
             .string_literal => |_| return self.interner.strTy(),
             .binary_expr => |expr| blk: {
                 const left_ty = try self.typeCheckNode(expr.left);
+                const old_hint = self.ty_hint;
+                defer self.ty_hint = old_hint;
+
+                switch (expr.op) {
+                    .assign,
+                    .plus_eq,
+                    .minus_eq,
+                    .times_eq,
+                    .divide_eq,
+                    .bitor_eq,
+                    .bitxor_eq,
+                    => {
+                        self.ty_hint = left_ty;
+                    },
+                    else => {},
+                }
+
                 const right_ty = try self.typeCheckNode(expr.right);
 
                 if (canCoerce(left_ty, right_ty)) {
@@ -608,6 +682,7 @@ pub const TypeChecker = struct {
                 }
 
                 break :blk switch (expr.op) {
+                    .assign,
                     .plus_eq,
                     .minus_eq,
                     .times_eq,
@@ -728,25 +803,33 @@ pub const TypeChecker = struct {
 
                 const len = @min(expected_types.len, arg_nodes.len);
 
-                // @TODO: check trailing block arg
-                for (arg_nodes[0..len], 0..) |arg_id, i| {
-                    // For the args passed in, we get the actual parameter index and compare the type
-                    // of the arg with the type of the function's paramater at that index.
-                    const param_node_id = self.analyzer.node_ref.get(arg_id) orelse @panic("unable to get node ref");
-                    const param_node = &self.nodes[param_node_id.index];
-                    const param = &param_node.kind.parameter;
+                {
+                    const old_hint = self.ty_hint;
+                    defer self.ty_hint = old_hint;
+                    // @TODO: check trailing block arg
+                    for (arg_nodes[0..len], 0..) |arg_id, i| {
+                        // For the args passed in, we get the actual parameter index and compare the type
+                        // of the arg with the type of the function's paramater at that index.
+                        const param_node_id = self.analyzer.node_ref.get(arg_id) orelse @panic("unable to get node ref");
+                        const param_node = &self.nodes[param_node_id.index];
+                        const param = &param_node.kind.parameter;
 
-                    const param_name = try self.analyzer.getSegment(param.name) orelse @panic("Unable to get param segment");
-                    const param_scope = func_scope.children.get(param_name) orelse @panic("Couldn't get parameter in function");
-                    const param_index = param_scope.kind.local.parameter.?;
+                        const param_name = try self.analyzer.getSegment(param.name) orelse @panic("Unable to get param segment");
+                        const param_scope = func_scope.children.get(param_name) orelse @panic("Couldn't get parameter in function");
+                        const param_index = param_scope.kind.local.parameter.?;
 
-                    const arg_ty = try self.typeCheckNode(arg_id);
+                        const exp_ty = expected_types[param_index];
+                        self.ty_hint = exp_ty;
+                        const arg_ty = try self.typeCheckNode(arg_id);
 
-                    const exp_ty = expected_types[param_index];
-                    unchecked_args.unset(param_index);
+                        unchecked_args.unset(param_index);
 
-                    if (!self.coerceNode(arg_id, arg_ty, exp_ty)) {
-                        std.log.err("Function argument mismatch! For arg {}.", .{i}); // @TODO: print the types
+                        if (!self.coerceNode(arg_id, arg_ty, exp_ty)) {
+                            const arg_ty_str = self.interner.printTyToStr(arg_ty, self.arena);
+                            const exp_ty_str = self.interner.printTyToStr(exp_ty, self.arena);
+
+                            self.d.addErr(arg_id, "Function argument does not match parameter type! Expected {s} but found {s} (position {}).", .{ exp_ty_str, arg_ty_str, i }, .{});
+                        }
                     }
                 }
 
@@ -873,6 +956,13 @@ pub const TypeChecker = struct {
                 break :blk self.interner.unitTy();
             },
             .reference => |expr| blk: {
+                const old_ty_hint = self.ty_hint;
+                defer self.ty_hint = old_ty_hint;
+
+                if (self.ty_hint != null and self.ty_hint.?.* == .reference) {
+                    self.ty_hint = self.ty_hint.?.reference.base;
+                }
+
                 const base = try self.typeCheckNode(expr.expr);
                 const ref_ty = self.declared_types.get(self.last_ref.?) orelse @panic("Unable to get declared type");
 
@@ -880,8 +970,18 @@ pub const TypeChecker = struct {
                     // Case when taking reference of actual variable
                     const ref_path = self.analyzer.node_to_path.getEntry(self.last_ref.?) orelse @panic("Unable to get ref path");
                     const ref_scope = self.analyzer.getScopeFromPath(ref_path.value_ptr.*) orelse @panic("Uanble to get ref scope");
-                    break :blk1 ref_scope.kind.local.mutable;
+
+                    break :blk1 if (ref_scope.kind == .local)
+                        ref_scope.kind.local.mutable
+                    else
+                        false; // References a temp var
                 };
+
+                if (self.ty_hint != null and self.ty_hint.?.* == .slice and base.* == .array) {
+                    if (self.ty_hint.?.slice.base == base.array.base) {
+                        break :blk self.interner.sliceTy(base.array.base, mutable);
+                    }
+                }
 
                 break :blk self.interner.referenceTy(base, mutable);
             },
@@ -961,10 +1061,33 @@ pub const TypeChecker = struct {
                 if (nodes.len < 2) @panic("whoops");
 
                 // @TODO: do something smarter than just picking first element
-                const first_ty = try self.typeCheckNode(nodes[0]);
+
+                var first_ty = try self.typeCheckNode(nodes[0]);
+                const base_ty = if (self.ty_hint != null) switch (self.ty_hint.?.*) {
+                    .slice => |b| b.base,
+                    .array => |b| b.base,
+                    else => null,
+                } else null;
+
+                first_ty = if (base_ty) |ty| blk1: {
+                    if (!self.coerceNode(nodes[0], first_ty, ty)) {
+                        const first_ty_str = self.interner.printTyToStr(first_ty, self.arena);
+                        const ty_str = self.interner.printTyToStr(ty, self.arena);
+
+                        self.d.addErr(nodes[0], "Array initializer values type mismatch. Expected {s} but received {s} (position {})", .{ ty_str, first_ty_str, 0 }, .{});
+                        std.log.err("Array initializer values type mismatch (position {})", .{0});
+                    }
+
+                    break :blk1 ty;
+                } else first_ty;
+
                 for (nodes[1..], 0..) |id, i| {
                     const this_ty = try self.typeCheckNode(id);
                     if (!self.coerceNode(id, this_ty, first_ty)) {
+                        const this_ty_str = self.interner.printTyToStr(this_ty, self.arena);
+                        const first_ty_str = self.interner.printTyToStr(first_ty, self.arena);
+
+                        self.d.addErr(nodes[0], "Array initializer values type mismatch. Expected {s} but received {s} (position {})", .{ first_ty_str, this_ty_str, i }, .{});
                         std.log.err("Array initializer values type mismatch (position {})", .{i});
                     }
                 }
@@ -1102,6 +1225,20 @@ pub const TypeChecker = struct {
         return false;
     }
 
+    pub fn canConvert(from: Type, to: Type) bool {
+        if (from == to) return true;
+        return switch (from.*) {
+            .reference => |fref| switch (to.*) {
+                .slice => |tslice| switch (fref.base.*) {
+                    .array => |farr| !(!fref.mut and tslice.mut) and canCoerce(farr.base, tslice.base),
+                    else => false,
+                },
+                else => false,
+            },
+            else => false,
+        };
+    }
+
     pub fn canCoerce(from: Type, to: Type) bool {
         if (from == to) return true;
         return switch (from.*) {
@@ -1115,14 +1252,14 @@ pub const TypeChecker = struct {
             },
             .array => |farr| switch (to.*) {
                 .array => |tarr| farr.size == tarr.size and canCoerce(farr.base, tarr.base),
-                .slice => |tslice| canCoerce(farr.base, tslice.base),
+                // .slice => |tslice| canCoerce(farr.base, tslice.base),
                 else => false,
             },
             .reference => |fref| switch (to.*) {
-                .slice => |tslice| switch (fref.base.*) {
-                    .array => |farr| !(!fref.mut and tslice.mut) and canCoerce(farr.base, tslice.base),
-                    else => false,
-                },
+                // .slice => |tslice| switch (fref.base.*) {
+                //     .array => |farr| !(!fref.mut and tslice.mut) and canCoerce(farr.base, tslice.base),
+                //     else => false,
+                // },
                 .reference => |tref| !(!fref.mut and tref.mut) and canCoerce(fref.base, tref.base),
                 else => false,
             },

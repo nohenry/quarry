@@ -17,6 +17,7 @@ pub const Parser = struct {
     lexer: *tokenize.Lexer,
 
     nodes: std.ArrayList(node.Node),
+    node_tokens: std.ArrayList(node.NodeTokens),
     node_ranges: std.ArrayList(node.NodeId),
 
     const Self = @This();
@@ -27,6 +28,7 @@ pub const Parser = struct {
             .lexer = lexer,
 
             .nodes = std.ArrayList(node.Node).init(allocator),
+            .node_tokens = std.ArrayList(node.NodeTokens).init(allocator),
             .node_ranges = std.ArrayList(node.NodeId).init(allocator),
         };
     }
@@ -55,18 +57,19 @@ pub const Parser = struct {
         return self.node_ranges.items[start..];
     }
 
-    pub fn parseBraceBlock(self: *Self) !node.NodeRange {
-        _ = try self.expect(.open_brace);
-        if (self.consumeIfIs(.close_brace) != null) {
-            return node.NodeRange{
+    pub fn parseBraceBlock(self: *Self) !struct { node.NodeRange, tokenize.TokenId, tokenize.TokenId } {
+        const ob_tok = try self.expect(.open_brace);
+        var cb_tok = self.consumeIfIs(.close_brace);
+        if (cb_tok) |tok| {
+            return .{ node.NodeRange{
                 .start = @truncate(self.node_ranges.items.len),
                 .len = 0,
-            };
+            }, ob_tok[0], tok[0] };
         }
         const block = try self.parseBlock();
-        _ = try self.expect(.close_brace);
+        cb_tok = try self.expect(.close_brace);
 
-        return block;
+        return .{ block, ob_tok[0], cb_tok.?[0] };
     }
 
     pub fn parseBlock(self: *Self) !node.NodeRange {
@@ -113,7 +116,7 @@ pub const Parser = struct {
                 }
 
                 break :blk if (self.nextIsNoNL(.identifier) or self.nextIsNoNL(.mut))
-                    self.parseBindingWithType(expr)
+                    self.parseBindingWithType(expr, null)
                 else
                     expr;
             },
@@ -121,27 +124,35 @@ pub const Parser = struct {
     }
 
     pub fn parseBinding(self: *Self) !node.NodeId {
-        const ty = if (self.consumeIfIs(.let) == null)
+        const let_tok = self.consumeIfIs(.let);
+        const ty = if (let_tok == null)
             try self.parseType()
         else
             null;
 
-        return self.parseBindingWithType(ty);
+        return self.parseBindingWithType(ty, if (let_tok) |l| l[0] else null);
     }
 
-    pub fn parseBindingWithType(self: *Self, ty_node_id: ?node.NodeId) !node.NodeId {
-        const mutable = self.consumeIfIs(.mut) != null;
+    pub fn parseBindingWithType(self: *Self, ty_node_id: ?node.NodeId, let_tok: ?tokenize.TokenId) !node.NodeId {
+        const mutable = self.consumeIfIs(.mut);
         const name = try self.expect(.identifier);
-        _ = try self.expect(.assign);
+        const eq = try self.expect(.assign);
         const expr = try self.parseExpr();
 
         return self.createNode(.{
             .binding = .{
-                .name = name,
+                .name = name[1],
                 .ty = ty_node_id,
-                .mutable = mutable,
+                .mutable = mutable != null,
                 .tags = node.SymbolTag.Tag.initEmpty(),
                 .value = expr,
+            },
+        }, .{
+            .binding = .{
+                .let_tok = let_tok,
+                .mut_tok = if (mutable) |m| m[0] else null,
+                .name_tok = name[0],
+                .eq_tok = eq[0],
             },
         });
     }
@@ -165,7 +176,7 @@ pub const Parser = struct {
 
             const prec = binaryPrec(op);
             if (prec == 0 or prec < last_prec) break;
-            _ = self.lexer.next();
+            const op_final_tok = self.lexer.next();
 
             const right = try self.parseBinExpr(prec);
 
@@ -175,6 +186,8 @@ pub const Parser = struct {
                     .op = op,
                     .right = right,
                 },
+            }, .{
+                .single = op_final_tok.?.id,
             });
         }
 
@@ -195,7 +208,7 @@ pub const Parser = struct {
             switch (tok.?.kind) {
                 .open_paren => {
                     // parseInvoke
-                    _ = self.next();
+                    const op_tok = self.next();
                     const first = if (!self.nextIs(.close_paren))
                         try self.parseArgument()
                     else
@@ -209,7 +222,7 @@ pub const Parser = struct {
                             .len = 0,
                         };
 
-                    _ = try self.expect(.close_paren);
+                    const cp_tok = try self.expect(.close_paren);
 
                     const trailing_block = if (self.nextIs(.open_brace))
                         try self.parseBraceBlock()
@@ -220,20 +233,30 @@ pub const Parser = struct {
                         .invoke = .{
                             .expr = left,
                             .args = args,
-                            .trailing_block = trailing_block,
+                            .trailing_block = if (trailing_block) |tb| tb[0] else null,
+                        },
+                    }, .{
+                        .invoke = .{
+                            .open_paren_tok = op_tok.?.id,
+                            .close_paren_tok = cp_tok[0],
                         },
                     });
                 },
                 .open_bracket => {
                     // parseSubscript
-                    _ = self.next();
+                    const ob_tok = self.next();
                     const sub = try self.parseExpr();
-                    _ = try self.expect(.close_bracket);
+                    const cb_tok = try self.expect(.close_bracket);
 
                     left = try self.createNode(.{
                         .subscript = .{
                             .expr = left,
                             .sub = sub,
+                        },
+                    }, .{
+                        .subscript = .{
+                            .open_bracket_tok = ob_tok.?.id,
+                            .close_bracket_tok = cb_tok[0],
                         },
                     });
                 },
@@ -272,17 +295,22 @@ pub const Parser = struct {
 
             switch (tok.?.kind) {
                 .mut => {
-                    _ = self.next();
+                    const mut_tok = self.next();
                     if (!self.nextIs(.ampersand)) {
                         self.lexer.resyncN(2);
                         break;
                     }
-                    _ = try self.expect(.ampersand);
+                    const ref_tok = try self.expect(.ampersand);
 
                     left = try self.createNode(.{
                         .type_ref = .{
                             .ty = left,
                             .mut = true,
+                        },
+                    }, .{
+                        .type_ref = .{
+                            .ref_tok = ref_tok[0],
+                            .mut_tok = mut_tok.?.id,
                         },
                     });
                 },
@@ -309,18 +337,21 @@ pub const Parser = struct {
         const tok = self.peek() orelse return error.UnexpectedEnd;
         switch (tok.kind) {
             .type => {
-                _ = self.next();
+                const ty_tok = self.next();
 
-                const backing_field = if (self.consumeIfIs(.open_paren) != null) blk: {
+                const op_tok = self.consumeIfIs(.open_paren);
+                var cp_tok: ?tokenize.TokenId = null;
+
+                const backing_field = if (op_tok != null) blk: {
                     const field = try self.parseExpr();
-                    _ = try self.expect(.close_paren);
+                    cp_tok = (try self.expect(.close_paren))[0];
                     break :blk field;
                 } else null;
 
-                if (self.consumeIfIs(.open_bracket) != null) {
+                if (self.consumeIfIs(.open_bracket)) |ob_tok| {
                     // parseRecord
 
-                    if (self.consumeIfIs(.close_bracket) != null) {
+                    if (self.consumeIfIs(.close_bracket)) |cb_tok| {
                         return self.createNode(.{
                             .type_record = .{
                                 .backing_field = backing_field,
@@ -329,17 +360,36 @@ pub const Parser = struct {
                                     .len = 0,
                                 },
                             },
+                        }, .{
+                            .type_record = .{
+                                .ty_tok = ty_tok.?.id,
+                                .open_paren_tok = if (op_tok) |tk| tk[0] else null,
+                                .close_paren_tok = cp_tok,
+
+                                .open_bracket_tok = ob_tok[0],
+                                .close_bracket_tok = cb_tok[0],
+                            },
                         });
                     }
 
                     const first = try self.parseRecordField();
                     const fields = try self.parseCommaSimpleFirst(first, .close_bracket, parseRecordField);
-                    _ = try self.expect(.close_bracket);
+                    const cb_tok = try self.expect(.close_bracket);
 
                     return self.createNode(.{
                         .type_record = .{
                             .backing_field = backing_field,
                             .fields = fields,
+                        },
+                    }, .{
+                        .type_record = .{
+                            .ty_tok = ty_tok.?.id,
+
+                            .open_paren_tok = if (op_tok) |tk| tk[0] else null,
+                            .close_paren_tok = cp_tok,
+
+                            .open_bracket_tok = ob_tok[0],
+                            .close_bracket_tok = cb_tok[0],
                         },
                     });
                 }
@@ -348,15 +398,15 @@ pub const Parser = struct {
                 if (self.nextIs(.pipe) or self.nextIs(.identifier) or self.nextIs(.assign)) {
                     // parseUnion
 
-                    const variant = try self.parseUnionVariantFirstExpr(first_ty);
+                    const variant = try self.parseUnionVariantFirstExpr(first_ty, null);
 
                     var these_nodes = std.ArrayList(node.NodeId).init(self.arena.allocator());
                     try these_nodes.append(variant);
 
                     var pipe = self.peek();
                     while (pipe != null and pipe.?.kind == .pipe) : (pipe = self.peek()) {
-                        _ = self.next();
-                        const next_variant = try self.parseUnionVariant();
+                        const pipe_tok = self.next();
+                        const next_variant = try self.parseUnionVariant(pipe_tok.?.id);
                         try these_nodes.append(next_variant);
                     }
 
@@ -371,21 +421,30 @@ pub const Parser = struct {
                                 .len = @truncate(self.node_ranges.items.len - starti),
                             },
                         },
+                    }, .{
+                        .type_union = .{
+                            .ty_tok = ty_tok.?.id,
+
+                            .open_paren_tok = if (op_tok) |tk| tk[0] else null,
+                            .close_paren_tok = cp_tok,
+                        },
                     });
                 }
 
                 return self.createNode(.{
                     .type_alias = first_ty,
-                });
+                }, .{ .single = ty_tok.?.id });
             },
             .open_paren => {
-                _ = self.next();
-                const expr = if (self.consumeIfIs(.close_paren) == null)
+                const op_tok = self.next();
+                var cp_tok = self.consumeIfIs(.close_paren);
+                const expr = if (cp_tok == null)
                     try self.parseExpr()
                 else
                     null;
 
-                if (expr != null and self.consumeIfIs(.close_paren) != null) {
+                cp_tok = self.consumeIfIs(.close_paren);
+                if (expr != null and cp_tok != null) {
                     return expr.?;
                 }
                 // parseFunc
@@ -393,19 +452,19 @@ pub const Parser = struct {
                     const first_param = try self.parseParameterWithFirstType(expr.?);
                     const params = try self.parseCommaSimpleFirst(first_param, .close_paren, parseParameter);
 
-                    _ = try self.expect(.close_paren);
+                    const this_cp_tok = try self.expect(.close_paren);
 
-                    return self.parseFuncWithParams(params);
+                    return self.parseFuncWithParams(params, op_tok.?.id, this_cp_tok[0]);
                 } else if (expr == null) {
-                    return self.parseFuncWithParams(null);
+                    return self.parseFuncWithParams(null, op_tok.?.id, cp_tok.?[0]);
                 }
 
-                try self.expect(.close_paren);
+                _ = try self.expect(.close_paren);
 
                 return expr.?;
             },
             .open_bracket => {
-                _ = self.next();
+                const ob_tok = self.next();
 
                 // parseArrayInit
                 // parseSliceType
@@ -413,8 +472,9 @@ pub const Parser = struct {
 
                 const mut = self.consumeIfIs(.mut);
                 const expr = try self.parseExpr();
+                const colon_tok = self.consumeIfIs(.colon);
 
-                const value = if (self.consumeIfIs(.colon) != null)
+                const value = if (colon_tok != null)
                     try self.parseExpr()
                 else
                     null;
@@ -427,7 +487,7 @@ pub const Parser = struct {
                                 .key = expr,
                                 .value = val,
                             },
-                        });
+                        }, .{ .single = colon_tok.?[0] });
 
                         try these_nodes.append(next_expr);
                     } else {
@@ -441,14 +501,15 @@ pub const Parser = struct {
                         _ = self.next();
                         var next_expr = try self.parseExpr();
 
-                        if (self.consumeIfIs(.colon) != null) {
+                        const nx_colon_tok = self.consumeIfIs(.colon);
+                        if (nx_colon_tok) |nx_tok| {
                             const this_value = try self.parseExpr();
                             next_expr = try self.createNode(.{
                                 .key_value = .{
                                     .key = next_expr,
                                     .value = this_value,
                                 },
-                            });
+                            }, .{ .single = nx_tok[0] });
 
                             if (!is_record) {
                                 std.log.err("Expected record field but found single expression!", .{});
@@ -463,7 +524,7 @@ pub const Parser = struct {
                     const starti = self.node_ranges.items.len;
                     try self.node_ranges.appendSlice(these_nodes.items);
 
-                    _ = try self.expect(.close_bracket);
+                    const cb_tok = try self.expect(.close_bracket);
 
                     return self.createNode(.{
                         .array_init = .{
@@ -472,10 +533,15 @@ pub const Parser = struct {
                                 .len = @truncate(self.node_ranges.items.len - starti),
                             },
                         },
+                    }, .{
+                        .array_init = .{
+                            .open_bracket_tok = ob_tok.?.id,
+                            .close_bracket_tok = cb_tok[0],
+                        },
                     });
                 }
 
-                _ = try self.expect(.close_bracket);
+                const cb_tok = try self.expect(.close_bracket);
 
                 return self.createNode(.{
                     .array_init_or_slice_one = .{
@@ -483,11 +549,17 @@ pub const Parser = struct {
                         .value = value,
                         .mut = mut != null,
                     },
+                }, .{
+                    .array_init_or_slice_one = .{
+                        .mut_tok = if (mut) |m| m[0] else null,
+                        .open_bracket_tok = ob_tok.?.id,
+                        .close_bracket_tok = cb_tok[0],
+                    },
                 });
             },
             .@"if" => {
                 // parseIf
-                _ = self.next();
+                const if_tok = self.next();
                 const cond = try self.parseExpr();
 
                 const captures = if (self.consumeIfIs(.arrow) != null) blk1: {
@@ -503,7 +575,8 @@ pub const Parser = struct {
 
                 const true_block = try self.parseBraceBlock();
 
-                const false_block = if (self.consumeIfIs(.@"else") != null)
+                const else_tok = self.consumeIfIs(.@"else");
+                const false_block = if (else_tok != null)
                     try self.parseBraceBlock()
                 else
                     null;
@@ -512,14 +585,24 @@ pub const Parser = struct {
                     .if_expr = .{
                         .cond = cond,
                         .captures = captures,
-                        .true_block = true_block,
-                        .false_block = false_block,
+                        .true_block = true_block[0],
+                        .false_block = if (false_block) |fb| fb[0] else null,
+                    },
+                }, .{
+                    .if_expr = .{
+                        .if_tok = if_tok.?.id,
+                        .open_brace_tok = true_block[1],
+                        .close_brace_tok = true_block[2],
+
+                        .else_tok = if (else_tok) |et| et[0] else null,
+                        .else_open_brace_tok = if (false_block) |fb| fb[1] else null,
+                        .else_close_brace_tok = if (false_block) |fb| fb[2] else null,
                     },
                 });
             },
             .loop => {
-                // parseLoop
-                _ = self.next();
+                // parseLoop,
+                const loop_tok = self.next();
                 const expr = if (!self.nextIs(.open_brace))
                     try self.parseExpr()
                 else
@@ -537,12 +620,14 @@ pub const Parser = struct {
                 } else null;
                 const loop_block = try self.parseBraceBlock();
 
-                const finally_block_pre = if (self.consumeIfIs(.finally) != null)
+                var finally_tok = self.consumeIfIs(.finally);
+                const finally_block_pre = if (finally_tok != null)
                     try self.parseBraceBlock()
                 else
                     null;
 
-                const else_block = if (self.consumeIfIs(.@"else") != null)
+                const else_tok = self.consumeIfIs(.@"else");
+                const else_block = if (else_tok != null)
                     try self.parseBraceBlock()
                 else
                     null;
@@ -553,52 +638,84 @@ pub const Parser = struct {
 
                 const finally_block = if (finally_block_pre) |blk|
                     blk
-                else if (self.consumeIfIs(.finally) != null)
-                    try self.parseBraceBlock()
-                else
-                    null;
+                else blk: {
+                    finally_tok = self.consumeIfIs(.finally);
+
+                    break :blk if (finally_tok != null)
+                        try self.parseBraceBlock()
+                    else
+                        null;
+                };
 
                 return self.createNode(.{
                     .loop = .{
                         .expr = expr,
                         .captures = captures,
-                        .loop_block = loop_block,
-                        .else_block = else_block,
-                        .finally_block = finally_block,
+
+                        .loop_block = loop_block[0],
+                        .else_block = if (else_block) |eb| eb[0] else null,
+                        .finally_block = if (finally_block) |fb| fb[0] else null,
+                    },
+                }, .{
+                    .loop = .{
+                        .loop_tok = loop_tok.?.id,
+
+                        .open_brace_tok = loop_block[1],
+                        .close_brace_tok = loop_block[2],
+
+                        .else_tok = if (else_tok) |et| et[0] else null,
+                        .else_open_brace_tok = if (else_block) |eb| eb[1] else null,
+                        .else_close_brace_tok = if (else_block) |eb| eb[2] else null,
+
+                        .finally_tok = if (finally_tok) |ft| ft[0] else null,
+                        .finally_open_brace_tok = if (finally_block) |fb| fb[1] else null,
+                        .finally_close_brace_tok = if (finally_block) |fb| fb[2] else null,
                     },
                 });
             },
             .@"const" => {
-                _ = self.next();
+                const const_tok = self.next();
                 if (self.nextIs(.open_brace)) {
                     const block = try self.parseBraceBlock();
                     return self.createNode(.{
-                        .const_block = .{ .block = block },
+                        .const_block = .{ .block = block[0] },
+                    }, .{
+                        .const_block = .{
+                            .const_tok = const_tok.?.id,
+                            .open_brace_tok = block[1],
+                            .close_brace_tok = block[2],
+                        },
                     });
                 } else {
                     const expr = try self.parseExpr();
                     return self.createNode(.{
                         .const_expr = .{ .expr = expr },
-                    });
+                    }, .{ .single = const_tok.?.id });
                 }
             },
             else => return self.parseLiteral(),
         }
     }
 
-    pub fn parseFuncWithParams(self: *Self, params: ?node.NodeRange) !node.NodeId {
+    pub fn parseFuncWithParams(
+        self: *Self,
+        params: ?node.NodeRange,
+        op_tok: tokenize.TokenId,
+        cp_tok: tokenize.TokenId,
+    ) !node.NodeId {
         const ty = if (!self.nextIs(.open_brace))
             try self.parseExpr()
         else
             null;
 
-        _ = try self.expect(.open_brace);
+        const ob_tok = try self.expect(.open_brace);
+        var cb_tok = self.consumeIfIs(.close_brace);
 
-        const block = if (self.consumeIfIs(.close_brace) != null)
+        const block = if (cb_tok != null)
             node.NodeRange{ .start = @truncate(self.node_ranges.items.len), .len = 0 }
         else blk: {
             const block = try self.parseBlock();
-            _ = try self.expect(.close_brace);
+            cb_tok = try self.expect(.close_brace);
             break :blk block;
         };
 
@@ -609,12 +726,26 @@ pub const Parser = struct {
                     .ret_ty = ty,
                     .block = block,
                 },
+            }, .{
+                .func = .{
+                    .open_paren_tok = op_tok,
+                    .close_paren_tok = cp_tok,
+                    .open_brace_tok = ob_tok[0],
+                    .close_brace_tok = cb_tok.?[0],
+                },
             });
         } else {
             return self.createNode(.{
                 .func_no_params = .{
                     .ret_ty = ty,
                     .block = block,
+                },
+            }, .{
+                .func = .{
+                    .open_paren_tok = op_tok,
+                    .close_paren_tok = cp_tok,
+                    .open_brace_tok = ob_tok[0],
+                    .close_brace_tok = cb_tok.?[0],
                 },
             });
         }
@@ -624,7 +755,8 @@ pub const Parser = struct {
         const ty = try self.parseExpr();
         const name = try self.expect(.identifier);
 
-        const default = if (self.consumeIfIs(.assign) != null)
+        const eq_tok = self.consumeIfIs(.assign);
+        const default = if (eq_tok != null)
             try self.parseExpr()
         else
             null;
@@ -632,24 +764,30 @@ pub const Parser = struct {
         return self.createNode(.{
             .record_field = .{
                 .ty = ty,
-                .name = name,
+                .name = name[1],
                 .default = default,
+            },
+        }, .{
+            .record_field = .{
+                .name_tok = name[0],
+                .eq_tok = if (eq_tok) |eq| eq[0] else null,
             },
         });
     }
 
-    pub fn parseUnionVariant(self: *Self) !node.NodeId {
+    pub fn parseUnionVariant(self: *Self, pipe_tok: ?tokenize.TokenId) !node.NodeId {
         const first = try self.parseBinExpr(81);
-        return self.parseUnionVariantFirstExpr(first);
+        return self.parseUnionVariantFirstExpr(first, pipe_tok);
     }
 
-    pub fn parseUnionVariantFirstExpr(self: *Self, first: node.NodeId) !node.NodeId {
+    pub fn parseUnionVariantFirstExpr(self: *Self, first: node.NodeId, pipe_tok: ?tokenize.TokenId) !node.NodeId {
         const name = if (self.nextIsNoNL(.newline) or !self.hasNext() or self.nextIs(.pipe) or self.nextIs(.assign))
             first
         else
             try self.parseLiteral();
 
-        const index = if (self.consumeIfIs(.assign) != null)
+        const eq_tok = self.consumeIfIs(.assign);
+        const index = if (eq_tok != null)
             try self.parseBinExpr(81)
         else
             null;
@@ -659,6 +797,11 @@ pub const Parser = struct {
                 .ty = first,
                 .name = name,
                 .index = index,
+            },
+        }, .{
+            .union_variant = .{
+                .pipe_tok = pipe_tok,
+                .eq_tok = if (eq_tok) |eq| eq[0] else null,
             },
         });
     }
@@ -709,14 +852,14 @@ pub const Parser = struct {
     pub fn parseArgument(self: *Self) !node.NodeId {
         const val = try self.parseKvOrExpr();
         if (self.nodes.items[val.index].kind != .key_value and self.nodes.items[val.index].kind != .key_value_ident) {
-            return self.createNode(.{ .argument = val });
+            return self.createNode(.{ .argument = val }, self.node_tokens.items[val.index]);
         }
         return val;
     }
 
     pub fn parseKvOrExpr(self: *Self) !node.NodeId {
         const first = try self.parseExpr();
-        if (self.consumeIfIs(.colon) != null) {
+        if (self.consumeIfIs(.colon)) |colon_tok| {
             if (self.nodes.items[first.index].kind == .identifier) {
                 const key = self.nodes.items[first.index].kind.identifier;
                 self.nodes.items.len -= 1;
@@ -727,6 +870,11 @@ pub const Parser = struct {
                         .key = key,
                         .value = value,
                     },
+                }, .{
+                    .key_value_ident = .{
+                        .name_tok = self.node_tokens.items[first.index].single,
+                        .colon_tok = colon_tok[0],
+                    },
                 });
             }
             const value = try self.parseExpr();
@@ -735,7 +883,7 @@ pub const Parser = struct {
                     .key = first,
                     .value = value,
                 },
-            });
+            }, .{ .single = colon_tok[0] });
         }
 
         return first;
@@ -747,9 +895,11 @@ pub const Parser = struct {
     }
 
     pub fn parseParameterWithFirstType(self: *Self, ty: node.NodeId) !node.NodeId {
-        const spread = self.consumeIfIs(.spread) != null;
+        const spread = self.consumeIfIs(.spread);
         const ident = try self.expect(.identifier);
-        const default = if (self.consumeIfIs(.assign) != null)
+        const eq_tok = self.consumeIfIs(.assign);
+
+        const default = if (eq_tok != null)
             try self.parseExpr()
         else
             null;
@@ -757,9 +907,15 @@ pub const Parser = struct {
         return self.createNode(.{
             .parameter = .{
                 .ty = ty,
-                .spread = spread,
-                .name = ident,
+                .spread = spread != null,
+                .name = ident[1],
                 .default = default,
+            },
+        }, .{
+            .parameter = .{
+                .spread_tok = if (spread) |s| s[0] else null,
+                .name_tok = ident[0],
+                .eq_tok = if (eq_tok) |eq| eq[0] else null,
             },
         });
     }
@@ -802,11 +958,14 @@ pub const Parser = struct {
         }
     }
 
-    inline fn consumeIfIs(self: *Self, comptime kind: std.meta.FieldEnum(tokenize.TokenKind)) ?std.meta.FieldType(tokenize.TokenKind, kind) {
+    inline fn consumeIfIs(self: *Self, comptime kind: std.meta.FieldEnum(tokenize.TokenKind)) ?struct {
+        tokenize.TokenId,
+        std.meta.FieldType(tokenize.TokenKind, kind),
+    } {
         const tok = self.peek() orelse return null;
         if (tok.kind == kind) {
             _ = self.next();
-            return @field(tok.kind, @tagName(kind));
+            return .{ self.lexer.lastIndex(), @field(tok.kind, @tagName(kind)) };
         }
 
         return null;
@@ -845,21 +1004,27 @@ pub const Parser = struct {
         return self.lexer.next();
     }
 
-    fn expect(self: *Self, comptime kind: std.meta.FieldEnum(tokenize.TokenKind)) !std.meta.FieldType(tokenize.TokenKind, kind) {
+    fn expect(self: *Self, comptime kind: std.meta.FieldEnum(tokenize.TokenKind)) !struct {
+        tokenize.TokenId,
+        std.meta.FieldType(tokenize.TokenKind, kind),
+    } {
         const tok = self.peek() orelse return error.UnexpectedEnd;
         if (tok.kind == kind) {
             _ = self.next();
-            return @field(tok.kind, @tagName(kind));
+            return .{ self.lexer.lastIndex(), @field(tok.kind, @tagName(kind)) };
         }
 
         return error.UnexpectedToken;
     }
 
-    fn expectNoNL(self: *Self, comptime kind: std.meta.FieldEnum(tokenize.TokenKind)) !std.meta.FieldType(tokenize.TokenKind, kind) {
+    fn expectNoNL(self: *Self, comptime kind: std.meta.FieldEnum(tokenize.TokenKind)) !struct {
+        tokenize.TokenId,
+        std.meta.FieldType(tokenize.TokenKind, kind),
+    } {
         const tok = self.peekNoNL() orelse return error.UnexpectedEnd;
         if (tok.kind == kind) {
             _ = self.nextNoNL();
-            return @field(tok.kind, @tagName(kind));
+            return .{ self.lexer.lastIndex(), @field(tok.kind, @tagName(kind)) };
         }
 
         return error.UnexpectedToken;
@@ -867,15 +1032,15 @@ pub const Parser = struct {
 
     fn createNodeAndNext(self: *Self, kind: node.NodeKind) !node.NodeId {
         _ = self.next();
-        return try self.createNode(kind);
+        return try self.createNode(kind, .{ .single = self.lexer.lastIndex() });
     }
 
     fn createNodeAndNextNoNL(self: *Self, kind: node.NodeKind) !node.NodeId {
         _ = self.nextNoNL();
-        return try self.createNode(kind);
+        return try self.createNode(kind, .{ .single = self.lexer.lastIndex() });
     }
 
-    fn createNode(self: *Self, kind: node.NodeKind) !node.NodeId {
+    fn createNode(self: *Self, kind: node.NodeKind, tokens: node.NodeTokens) !node.NodeId {
         const index = self.nodes.items.len;
         const id: node.NodeId = .{
             .file = 0,
@@ -886,6 +1051,8 @@ pub const Parser = struct {
             .id = id,
             .kind = kind,
         });
+
+        try self.node_tokens.append(tokens);
 
         return id;
     }

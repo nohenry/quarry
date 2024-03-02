@@ -2,13 +2,15 @@ const std = @import("std");
 const tokenize = @import("tokenize.zig");
 
 pub const NodeId = packed struct {
-    file: u32,
     index: u32,
+    file: u32,
 
     pub inline fn eql(self: NodeId, other: NodeId) bool {
         return self.file == other.file and self.index == other.index;
     }
 };
+
+pub const TokenIndex = tokenize.TokenId;
 
 pub const NodeRange = packed struct {
     start: u32,
@@ -205,6 +207,7 @@ pub const NodeKind = union(enum) {
 
     binding: struct {
         ty: ?NodeId,
+        // tok_index is let
         mutable: bool,
         name: []const u8,
         tags: SymbolTag.Tag,
@@ -279,8 +282,12 @@ pub const NodeKind = union(enum) {
     dereference: struct {
         expr: NodeId,
     },
-    const_expr: struct { expr: NodeId },
-    const_block: struct { block: NodeRange },
+    const_expr: struct {
+        expr: NodeId,
+    },
+    const_block: struct {
+        block: NodeRange,
+    },
 
     /// Either an array/record init epxression
     ///  - [1]
@@ -319,13 +326,137 @@ pub const NodeKind = union(enum) {
 
     type_alias: NodeId,
 
-    type_ref: struct { ty: NodeId, mut: bool },
-    type_opt: struct { ty: NodeId },
+    type_ref: struct {
+        ty: NodeId,
+        mut: bool,
+    },
+    type_opt: struct {
+        ty: NodeId,
+    },
 
     type_int: usize,
     type_uint: usize,
     type_float: usize,
     type_bool,
+};
+
+pub const NodeTokens = union(enum) {
+    single: TokenIndex,
+    binding: struct {
+        let_tok: ?TokenIndex,
+        mut_tok: ?TokenIndex,
+        name_tok: TokenIndex,
+        eq_tok: TokenIndex,
+    },
+    parameter: struct {
+        spread_tok: ?TokenIndex,
+        name_tok: TokenIndex,
+        eq_tok: ?TokenIndex,
+    },
+    key_value_ident: struct {
+        name_tok: TokenIndex,
+        colon_tok: TokenIndex,
+    },
+    func: struct {
+        open_paren_tok: TokenIndex,
+        close_paren_tok: TokenIndex,
+
+        open_brace_tok: TokenIndex,
+        close_brace_tok: TokenIndex,
+    },
+    invoke: struct {
+        open_paren_tok: TokenIndex,
+        close_paren_tok: TokenIndex,
+    },
+    subscript: struct {
+        open_bracket_tok: TokenIndex,
+        close_bracket_tok: TokenIndex,
+    },
+    if_expr: struct {
+        if_tok: TokenIndex,
+
+        open_brace_tok: TokenIndex,
+        close_brace_tok: TokenIndex,
+
+        else_tok: ?TokenIndex,
+        else_open_brace_tok: ?TokenIndex,
+        else_close_brace_tok: ?TokenIndex,
+    },
+    loop: struct {
+        loop_tok: TokenIndex,
+
+        open_brace_tok: TokenIndex,
+        close_brace_tok: TokenIndex,
+
+        else_tok: ?TokenIndex,
+        else_open_brace_tok: ?TokenIndex,
+        else_close_brace_tok: ?TokenIndex,
+
+        finally_tok: ?TokenIndex,
+        finally_open_brace_tok: ?TokenIndex,
+        finally_close_brace_tok: ?TokenIndex,
+    },
+    const_block: struct {
+        const_tok: TokenIndex,
+        open_brace_tok: TokenIndex,
+        close_brace_tok: TokenIndex,
+    },
+    array_init_or_slice_one: struct {
+        mut_tok: ?TokenIndex,
+        open_bracket_tok: TokenIndex,
+        close_bracket_tok: TokenIndex,
+    },
+    array_init: struct {
+        open_bracket_tok: TokenIndex,
+        close_bracket_tok: TokenIndex,
+    },
+    type_record: struct {
+        ty_tok: TokenIndex,
+        open_paren_tok: ?TokenIndex,
+        close_paren_tok: ?TokenIndex,
+
+        open_bracket_tok: TokenIndex,
+        close_bracket_tok: TokenIndex,
+    },
+    record_field: struct {
+        name_tok: TokenIndex,
+        eq_tok: ?TokenIndex,
+    },
+    type_union: struct {
+        ty_tok: TokenIndex,
+        open_paren_tok: ?TokenIndex,
+        close_paren_tok: ?TokenIndex,
+    },
+    union_variant: struct {
+        pipe_tok: ?TokenIndex,
+        eq_tok: ?TokenIndex,
+    },
+    type_ref: struct {
+        ref_tok: TokenIndex,
+        mut_tok: ?TokenIndex,
+    },
+
+    // pub fn beginEnd(self: *const NodeTokens) struct { TokenIndex, ?TokenIndex } {
+    //     return switch (self.*) {
+    //         .single => |s| .{ s, null },
+    //         .binding => |v| .{ v.mut_tok orelse v.name_tok, v.eq_tok },
+    //         .parameter => |v| .{ v.spread_tok orelse v.name_tok, v.eq_tok orelse v.name_tok },
+    //         .key_value_ident => |v| .{ v.name_tok, v.colon_tok },
+    //         .func => |v| .{ v.open_paren_tok, v.close_brace_tok },
+    //         .invoke => |v| .{ v.open_paren_tok, v.close_paren_tok },
+    //         .subscript => |v| .{ v.open_bracket_tok, v.close_bracket_tok },
+    //         .if_expr => |v| .{ v.if_tok, v.else_close_brace_tok orelse v.close_brace_tok },
+    //         .loop => |v| .{ v.loop_tok, v.finally_close_brace_tok orelse v.else_close_brace_tok orelse v.close_brace_tok },
+    //         .const_block => |v| .{ v.const_tok, v.close_brace_tok },
+    //         .array_init_or_slice_one => |v| .{ v.open_bracket_tok, v.close_bracket_tok },
+    //         .array_init => |v| .{ v.open_bracket_tok, v.close_bracket_tok },
+    //         .type_record => |v| .{ v.ty_tok, v.close_bracket_tok },
+    //         .record_field => |v| .{ v.name_tok, v.eq_tok },
+    //         .type_union => |v| .{ v.ty_tok, v.close_paren_tok },
+    //         .union_variant => |v| .{ v.pipe_tok orelse @panic("foo"), v.eq_tok },
+    //         .type_ref => |v| .{ v.ref_tok, v.mut_tok },
+    //     };
+    // }
 };
 
 pub const Operator = enum {
