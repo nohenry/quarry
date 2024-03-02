@@ -191,6 +191,7 @@ pub const Analyzer = struct {
     param_doing_default: bool = false,
     param_index: ?u32 = 0,
     last_ref: ?node.NodeId = null,
+    last_deferred: bool = false,
 
     const Self = @This();
 
@@ -323,6 +324,7 @@ pub const Analyzer = struct {
                 if (self.deferred) {
                     std.log.err("Unable to resolve symbol: `{s}`", .{str});
                 } else {
+                    self.last_deferred = true;
                     // @TODO: dont do this for locals
                     try self.deferred_nodes.append(.{
                         .path = try self.pathFromCurrent(),
@@ -404,6 +406,13 @@ pub const Analyzer = struct {
             },
             .invoke => |expr| blk: {
                 try self.analyzeNode(expr.expr);
+                if (self.last_deferred) {
+                    try self.deferred_nodes.append(.{
+                        .path = try self.pathFromCurrent(),
+                        .node = index,
+                    });
+                    self.last_deferred = false;
+                }
                 var doing_named: bool = false;
 
                 const func_scope = if (self.last_ref) |ref| blk1: {
@@ -469,6 +478,7 @@ pub const Analyzer = struct {
                                 while (it.next()) |lcl| {
                                     if (lcl.value_ptr.kind == .local and lcl.value_ptr.kind.local.parameter != null and lcl.value_ptr.kind.local.parameter.? == i) {
                                         const param_node_id = self.path_to_node.get(lcl.value_ptr.path);
+
                                         if (param_node_id) |id| {
                                             const ref_entry = try self.node_ref.getOrPut(item);
                                             if (checked_args.isSet(lcl.value_ptr.kind.local.parameter.?) or ref_entry.found_existing) {

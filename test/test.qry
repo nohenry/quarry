@@ -1,6 +1,4 @@
 
-let test_array_double = ([int8: 4] val) int8 { val[2] * 2 }
-let test_slice_double = ([int8] val) int8 { val[2] * 2 }
 
 let main = (int8 argc) int8 {
     [int8: 7] a = [1, 2, 3, 4, 5, 6, 7]
@@ -10,6 +8,8 @@ let main = (int8 argc) int8 {
     b[0]
 }
 
+let test_array_double = ([int8: 4] val) int8 { val[2] * 2 }
+let test_slice_double = ([int8] val) int8 { val[2] * 2 }
 
 let test_array1 = (int8 value) int8 {
     [int8: 4] totest = [1, 2, value, 4]
