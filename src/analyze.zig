@@ -1,5 +1,6 @@
 const std = @import("std");
 const node = @import("node.zig");
+const typecheck = @import("typecheck.zig");
 
 const AnalyzeError = error{
     ChildExists,
@@ -94,6 +95,7 @@ pub const ScopeKind = union(enum) {
         references: u32,
     },
     field: struct {
+        index: u32,
         references: u32,
     },
     local: struct {
@@ -399,7 +401,12 @@ pub const Analyzer = struct {
             .string_literal => |_| {},
             .binary_expr => |expr| {
                 try self.analyzeNode(expr.left);
-                try self.analyzeNode(expr.right);
+                switch (expr.op) {
+                    .member_access => {},
+                    else => {
+                        try self.analyzeNode(expr.right);
+                    },
+                }
             },
             .unary_expr => |expr| {
                 try self.analyzeNode(expr.expr);
@@ -568,15 +575,76 @@ pub const Analyzer = struct {
                 }
             },
             .array_init_or_slice_one => |val| {
-                try self.analyzeNode(val.expr);
-                if (val.value) |expr| {
-                    try self.analyzeNode(expr);
+                const record_scope = if (self.last_ref) |ref| blk1: {
+                    const path = self.node_to_path.get(ref) orelse break :blk1 null;
+                    const scope = self.getScopeFromPath(path) orelse break :blk1 null;
+                    try self.node_ref.put(index, ref);
+                    break :blk1 scope;
+                } else null;
+
+                const expr_node = self.nodes[val.expr.index];
+                if (val.mut or record_scope == null or expr_node.kind != .identifier or record_scope.?.children.getEntry(try self.segment(expr_node.kind.identifier)) == null) {
+                    try self.analyzeNode(val.expr);
+                    if (val.value) |expr| {
+                        try self.analyzeNode(expr);
+                    }
+                    return;
                 }
+
+                const key = try self.segment(expr_node.kind.identifier);
+
+                if (record_scope.?.children.getEntry(key)) |field| {
+                    if (field.value_ptr.kind == .field) {
+                        const field_node_id = self.path_to_node.get(field.value_ptr.path);
+                        if (field_node_id) |id| {
+                            const ref_entry = try self.node_ref.getOrPut(val.expr);
+                            ref_entry.value_ptr.* = id;
+                            field.value_ptr.kind.field.references += 1;
+                        }
+                    }
+                }
+
+                try self.analyzeNode(val.value.?);
             },
             .array_init => |val| {
                 const exprs = self.nodesRange(val.exprs);
-                for (exprs) |expr| {
-                    try self.analyzeNode(expr);
+                if (exprs.len == 0) return;
+                if (self.nodes[exprs[0].index].kind != .key_value or self.nodes[exprs[0].index].kind != .key_value_ident) {
+                    for (exprs) |expr| {
+                        try self.analyzeNode(expr);
+                    }
+                    return;
+                }
+
+                const record_scope = if (self.last_ref) |ref| blk1: {
+                    const path = self.node_to_path.get(ref) orelse break :blk1 null;
+                    const scope = self.getScopeFromPath(path) orelse break :blk1 null;
+                    try self.node_ref.put(index, ref);
+                    break :blk1 scope;
+                } else null;
+
+                var checked_args = std.bit_set.IntegerBitSet(512).initEmpty();
+                for (exprs) |item| {
+                    const arg_value = self.nodes[item.index].kind.key_value_ident;
+
+                    const key = try self.segment(arg_value.key);
+
+                    if (record_scope.?.children.getEntry(key)) |field| {
+                        if (field.value_ptr.kind == .field) {
+                            const field_node_id = self.path_to_node.get(field.value_ptr.path);
+                            if (field_node_id) |id| {
+                                const ref_entry = try self.node_ref.getOrPut(item);
+                                if (checked_args.isSet(field.value_ptr.kind.field.index) or ref_entry.found_existing) {
+                                    std.log.err("Field `{s}`has already been passed a value", .{key});
+                                }
+
+                                checked_args.set(field.value_ptr.kind.field.index);
+
+                                ref_entry.value_ptr.* = id;
+                                field.value_ptr.kind.field.references += 1;
+                            }
+                        }
+                    }
                 }
             },
 
@@ -585,19 +653,28 @@ pub const Analyzer = struct {
                     try self.analyzeNode(field);
                 }
 
+                const old_param_index = self.param_index;
+                defer self.param_index = old_param_index;
+
                 const field_nodes = self.nodesRange(record.fields);
-                for (field_nodes) |field| {
+                for (field_nodes, 0..) |field, i| {
+                    self.param_index = @truncate(i);
                     try self.analyzeNode(field);
                 }
             },
             .record_field => |field| {
                 try self.analyzeNode(field.ty);
                 {
-                    _ = try self.pushScope(try self.segment(field.name), .{
+                    const this_scope = try self.pushScope(try self.segment(field.name), .{
                         .field = .{
+                            .index = self.param_index.?,
                             .references = 0,
                         },
                     });
+
+                    try self.path_to_node.put(this_scope.path, index);
+                    try self.node_to_path.put(index, this_scope.path);
+
                     self.popScope();
                 }
 
@@ -610,8 +687,12 @@ pub const Analyzer = struct {
                     try self.analyzeNode(field);
                 }
 
+                const old_param_index = self.param_index;
+                defer self.param_index = old_param_index;
+
                 const variant_nodes = self.nodesRange(uni.variants);
-                for (variant_nodes) |variant| {
+                for (variant_nodes, 0..) |variant, i| {
+                    self.param_index = @truncate(i);
                     try self.analyzeNode(variant);
                 }
             },
@@ -623,6 +704,7 @@ pub const Analyzer = struct {
                         .identifier => |name| {
                             _ = try self.pushScope(try self.segment(name), .{
                                 .field = .{
+                                    .index = self.param_index.?,
                                     .references = 0,
                                 },
                             });
@@ -649,6 +731,20 @@ pub const Analyzer = struct {
             // else => std.log.err("Unhandled case: {}", .{node_value}),
         }
     }
+
+    // pub fn analyzeMemberAccess(self: *Self, lty: typecheck.Type,  expr: @TypeOf(node.Node.binary_expr)) void {
+    //     const rhs = self.nodes[expr.right.index].identifier;
+    //     if (self.last_ref == null) {
+    //         std.log.err("LHS does not support property access", .{});
+    //         return;
+    //     }
+
+    //     const last_path = self.node_to_path.get(self.last_ref.?) orelse @panic("Unable to get last path");
+    //     const last_scope = self.getScopeFromPath(last_path) orelse @panic("unable to get scope form path");
+
+    //     switch (last_scope.kind) {}
+
+    // }
 
     pub fn nodesRange(self: *const Self, range: node.NodeRange) []const node.NodeId {
         return self.node_ranges[range.start .. range.start + range.len];

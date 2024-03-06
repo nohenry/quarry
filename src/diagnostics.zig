@@ -229,6 +229,41 @@ pub const Diagnostics = struct {
         }
     }
 
+    pub fn addInfo(
+        self: *Self,
+        from: anytype,
+        comptime format: []const u8,
+        args: anytype,
+        config: struct {
+            to: ?@TypeOf(from) = null,
+        },
+    ) void {
+        var buf = std.ArrayList(u8).init(self.arena);
+        var buf_writer = buf.writer();
+        buf_writer.print(format, args) catch @panic("Memory allocation failed");
+
+        if (@TypeOf(from) == node.NodeId) {
+            const begin = self.beginEnd(from);
+            const end = if (config.to) |t| self.beginEnd(t)[1] else null;
+
+            self.diagnostics.append(.{
+                .msg = buf.items,
+                .level = .info,
+                .from = begin[0],
+                .to = end orelse begin[1],
+            }) catch @panic("Unable to apend diagonstic");
+        } else if (@TypeOf(from) == tokenize.TokenId) {
+            self.diagnostics.append(.{
+                .msg = buf.items,
+                .level = .info,
+                .from = from,
+                .to = config.to,
+            }) catch @panic("Unable to apend diagonstic");
+        } else if (@TypeOf(from) == tokenize.TokenId) {} else {
+            @compileError("Invalid from token provided");
+        }
+    }
+
     pub fn dump(
         self: *const Self,
         src_info: *tokenize.SourceInfo,

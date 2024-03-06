@@ -1,12 +1,38 @@
 
+let Data = type [int8 a]
 
 let main = (int8 argc) int8 {
-    [int8: 7] a = [1, 2, 3, 4, 5, 6, 7]
-    [int8] b = a.&
-    test_array_double([1, 2, 3, 4])
-    test_slice_double([1, 2, 3, 4].&)
-    b[0]
+    Data d = [a: argc * 2]
+    d.a
 }
+
+let test_record_double = (Data val) int8 { val.a * 2 }
+let test_record_double_ref = (Data& val) int8 { val.a * 2 }
+
+let test_record1 = (int8 value) int8 {
+    Data d = [a: value]
+    test_record_double(d)
+}
+
+let test_record2 = (int8 value) int8 {
+    Data d = [a: 0]
+    d.a = value
+    test_record_double(d)
+}
+
+let test_record3 = (int8 value) int8 {
+    Data d = [a: 0]
+    d.a = value
+    test_record_double_ref(d.&)
+}
+
+let test_record4 = (int8 value) int8 {
+    Data d = [a: 0]
+    d.a = value
+    Data& dp = d.&
+    test_record_double_ref(dp)
+}
+
 
 let test_array_double = ([int8: 4] val) int8 { val[2] * 2 }
 let test_slice_double = ([int8] val) int8 { val[2] * 2 }

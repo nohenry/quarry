@@ -105,12 +105,19 @@ pub const Instruction = struct {
                     std.debug.print("  false_block: {}-{}\n", .{ blk.start, blk.start + blk.len });
                 }
             },
+            .record_init => |value| {
+                std.debug.print("  range: {}-{}\n", .{ value.exprs.start, value.exprs.start + value.exprs.len });
+            },
             .array_init => |value| {
                 std.debug.print("  range: {}-{}\n", .{ value.exprs.start, value.exprs.start + value.exprs.len });
             },
 
             .loop => |loop| {
                 std.debug.print("  loop_block: {}-{}\n", .{ loop.loop_block.start, loop.loop_block.start + loop.loop_block.len });
+            },
+            .member_access => |acc| {
+                std.debug.print("  expr: {}-{}\n", .{ acc.expr.file, acc.expr.index });
+                std.debug.print("  index: {}n", .{acc.index});
             },
             .@"break" => |brk| {
                 if (brk.expr) |expr| {
@@ -173,6 +180,10 @@ pub const InstructionKind = union(enum) {
         true_block: InstructionRange,
         false_block: ?InstructionRange,
     },
+
+    record_init: struct {
+        exprs: InstructionRange,
+    },
     array_init: struct {
         exprs: InstructionRange,
     },
@@ -180,6 +191,10 @@ pub const InstructionKind = union(enum) {
     loop: struct {
         // captures: ?NodeRange,
         loop_block: InstructionRange,
+    },
+    member_access: struct {
+        expr: InstructionId,
+        index: usize,
     },
     @"break": struct {
         expr: ?InstructionId,
@@ -207,6 +222,7 @@ pub const FunctionValue = struct {
 
 pub const TypeValue = struct {
     node_id: node.NodeId,
+    // ty: typecheck.Type,
     // instructions: InstructionRange,
 };
 
@@ -414,6 +430,41 @@ pub const Evaluator = struct {
                 }
 
                 const lvalid = try self.evalNode(expr.left) orelse @panic("Invalid operand");
+
+                switch (expr.op) {
+                    .member_access => {
+                        var left_ty = self.typechecker.types.get(expr.left).?;
+                        const rhs = self.nodes[expr.right.index].kind.identifier;
+
+                        left_ty = left_ty.unwrapToRefBase();
+
+                        while (left_ty.* == .named) {
+                            left_ty = self.typechecker.declared_types.get(left_ty.named).?.owned_type.base;
+                        }
+
+                        left_ty = left_ty.unwrapToRefBase();
+
+                        switch (left_ty.*) {
+                            .record => |rec| {
+                                const fields_index = rec.fields.multi_type_keyed_impl;
+                                const fields = &self.typechecker.interner.multi_types_keyed.items[fields_index];
+
+                                break :blk try self.createInstruction(.{
+                                    .member_access = .{
+                                        .expr = lvalid,
+                                        .index = fields.getIndex(rhs).?,
+                                    },
+                                });
+                            },
+                            else => {
+                                // self.d.addErr(node_id, "LHS does not support field access!", .{}, .{});
+                                break :blk try self.createConst(.undef);
+                            },
+                        }
+                    },
+                    else => {},
+                }
+
                 const rvalid = try self.evalNode(expr.right) orelse @panic("Invalid operand");
 
                 switch (expr.op) {
@@ -671,22 +722,83 @@ pub const Evaluator = struct {
                     @panic("Unimplemetned");
                 }
 
-                const ty = self.typechecker.types.get(id) orelse @panic("Unable to get node type");
-                if (ty.* == .type) {
-                    // @TODO: wait what
-                    break :blk try self.createConst(.undef);
-                } else {
-                    const starti = self.instruction_ranges.items.len;
-                    const expr_id = try self.evalNode(ai.expr) orelse @panic("unable to eval array init node");
-                    try self.instruction_ranges.append(expr_id);
-                    break :blk try self.createInstruction(.{
-                        .array_init = .{
-                            .exprs = .{
-                                .start = @truncate(starti),
-                                .len = 1,
+                var ty = self.typechecker.types.get(id) orelse @panic("Unable to get node type");
+                self.typechecker.interner.printTy(ty);
+                if (ty.* == .named) {
+                    ty = self.typechecker.declared_types.get(ty.named).?.owned_type.base;
+                }
+                switch (ty.*) {
+                    .record => |record_ty| {
+                        // Record initilizer
+
+                        const ref_node_id = self.analyzer.node_ref.get(id) orelse @panic("uanble to get node ref");
+                        const bind_record_node = &self.nodes[ref_node_id.index].kind.binding;
+                        const record_node = &self.nodes[bind_record_node.value.index];
+                        const record_scope = blk1: {
+                            const path = self.analyzer.node_to_path.get(ref_node_id) orelse @panic("unable to get node path");
+                            const scope = self.analyzer.getScopeFromPath(path) orelse @panic("unable to get scope form apth");
+                            break :blk1 scope;
+                        };
+
+                        const fields_index = record_ty.fields.multi_type_keyed_impl;
+                        const fields = &self.typechecker.interner.multi_types_keyed.items[fields_index];
+
+                        var ordered_fields = std.ArrayList(InstructionId).init(self.arena);
+                        try ordered_fields.ensureTotalCapacity(fields.count());
+                        ordered_fields.items.len = fields.count();
+
+                        var unchecked_fields = std.bit_set.IntegerBitSet(256).initEmpty();
+                        unchecked_fields.setRangeValue(.{ .start = 0, .end = fields.count() }, true);
+
+                        const field_node_id = self.analyzer.node_ref.get(ai.expr) orelse @panic("unable to get node ref");
+
+                        const field_node = self.nodes[field_node_id.index].kind.record_field;
+                        const field_name = try self.analyzer.getSegment(field_node.name) orelse @panic("Unable to get field name");
+                        const field_scope = record_scope.children.get(field_name) orelse @panic("Unable to get field in funciton scope");
+                        const field_index = field_scope.kind.field.index;
+
+                        ordered_fields.items[field_index] = try self.evalNode(ai.value.?) orelse @panic("Invalid argument");
+
+                        unchecked_fields.unset(field_index);
+
+                        if (record_node.kind == .type_record) {
+                            const field_nodes = self.nodesRange(record_node.kind.type_record.fields);
+
+                            for (0..fields.count()) |i| {
+                                if (unchecked_fields.isSet(i)) {
+                                    const decl_field_node_id = field_nodes[i];
+                                    const decl_field = self.nodes[decl_field_node_id.index].kind.record_field;
+
+                                    ordered_fields.items[i] = try self.evalNode(decl_field.default.?) orelse @panic("Unable to get default value");
+                                }
+                            }
+                        }
+
+                        const starti = self.instruction_ranges.items.len;
+                        try self.instruction_ranges.appendSlice(ordered_fields.items);
+
+                        break :blk try self.createInstruction(.{
+                            .record_init = .{
+                                .exprs = .{
+                                    .start = @truncate(starti),
+                                    .len = @truncate(self.instruction_ranges.items.len - starti),
+                                },
                             },
-                        },
-                    });
+                        });
+                    },
+                    else => {
+                        const starti = self.instruction_ranges.items.len;
+                        const expr_id = try self.evalNode(ai.expr) orelse @panic("unable to eval array init node");
+                        try self.instruction_ranges.append(expr_id);
+                        break :blk try self.createInstruction(.{
+                            .array_init = .{
+                                .exprs = .{
+                                    .start = @truncate(starti),
+                                    .len = 1,
+                                },
+                            },
+                        });
+                    },
                 }
             },
             .array_init => |ai| blk: {
@@ -701,7 +813,7 @@ pub const Evaluator = struct {
             },
             .binding => |bind| blk: {
                 if (self.typechecker.declared_types.get(id)) |ty| {
-                    if (ty.* == .named or ty.* == .func) {
+                    if (ty.* == .owned_type or ty.* == .func) {
                         const value_node = self.nodes[bind.value.index];
                         switch (value_node.kind) {
                             .func => |func| {
@@ -764,10 +876,12 @@ pub const Evaluator = struct {
                             .type_int,
                             .type_uint,
                             .type_float,
-                            .array_init_or_slice_one,
                             .identifier,
                             => {
-                                try self.types.put(id, .{ .node_id = bind.value });
+                                try self.types.put(id, .{
+                                    .node_id = bind.value,
+                                    // .ty = ty.named,
+                                });
                             },
                             else => std.debug.panic("Unimplemented {}", .{value_node}),
                         }

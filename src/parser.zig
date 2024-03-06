@@ -1077,6 +1077,7 @@ fn binaryPrec(op: node.Operator) u8 {
         .divide_eq => 20,
         .bitor_eq => 20,
         .bitxor_eq => 20,
+        .member_access => 86,
 
         .equal => 30,
         .not_equal => 30,

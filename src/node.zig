@@ -477,6 +477,7 @@ pub const Operator = enum {
     subscript,
     ref,
     opt,
+    member_access,
 
     deref,
     take_ref,
@@ -520,6 +521,7 @@ pub const Operator = enum {
             .ampersand, .mut => .ref,
             .question => .opt,
 
+            .dot => .member_access,
             .dot_ampersand => .take_ref,
             .dot_star => .deref,
 

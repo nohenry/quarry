@@ -107,25 +107,25 @@ pub fn main() !void {
     else
         &[_]eval.InstructionId{};
 
-    // std.debug.print("File items: \n", .{});
-    // for (instrs) |nodeId| {
-    //     const instr = evaluator.instructions.items[@as(usize, nodeId.index)];
-    //     instr.print();
-    // }
+    std.debug.print("File items: \n", .{});
+    for (instrs) |nodeId| {
+        const instr = evaluator.instructions.items[@as(usize, nodeId.index)];
+        instr.print();
+    }
 
-    // std.debug.print("\nInstruction Ranges: \n", .{});
-    // for (evaluator.instruction_ranges.items) |nodeId| {
-    //     const instr = evaluator.instructions.items[@as(usize, nodeId.index)];
-    //     instr.print();
-    // }
+    std.debug.print("\nInstruction Ranges: \n", .{});
+    for (evaluator.instruction_ranges.items) |nodeId| {
+        const instr = evaluator.instructions.items[@as(usize, nodeId.index)];
+        instr.print();
+    }
 
-    // std.debug.print("\nAll instructions: \n", .{});
-    // for (evaluator.instructions.items) |instr| {
-    //     instr.print();
-    // }
+    std.debug.print("\nAll instructions: \n", .{});
+    for (evaluator.instructions.items) |instr| {
+        instr.print();
+    }
 
     if (diag.allGood()) {
-        var code_gen = gen.CodeGenerator.init(&anal, &evaluator, &tycheck, arena.allocator(), alloc.allocator());
+        var code_gen = gen.CodeGenerator.init(&anal, &evaluator, &tycheck, &diag, arena.allocator(), alloc.allocator());
         try code_gen.genInstructions(instrs);
     }
 
