@@ -7,6 +7,7 @@ function commaSep(rule, sep) {
 }
 
 const operators = [
+    [".", "member"],
     ["+", "binary_plus"],
     ["-", "binary_plus"],
     ["*", "binary_times"],
@@ -100,6 +101,7 @@ module.exports = grammar({
                 $.if_expr,
                 $.loop_expr,
                 $.call_expression,
+                $.subscript_expression,
                 $.const_expr,
                 prec.left(20, seq($.expression, '.*')),
                 prec.left(20, seq($.expression, '.&')),
@@ -266,6 +268,16 @@ module.exports = grammar({
                 seq(
                     field("function", $.expression),
                     field("arguments", $.argument_list)
+                )
+            ),
+        subscript_expression: ($) =>
+            prec(
+                "call",
+                seq(
+                    field("expr", $.expression),
+                    '[',
+                    field("subscript", $.expression),
+                    ']',
                 )
             ),
 

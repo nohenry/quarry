@@ -117,7 +117,17 @@ pub const Instruction = struct {
             },
             .member_access => |acc| {
                 std.debug.print("  expr: {}-{}\n", .{ acc.expr.file, acc.expr.index });
-                std.debug.print("  index: {}n", .{acc.index});
+                std.debug.print("  index: {}\n", .{acc.index});
+            },
+            .variant => |varn| {
+                std.debug.print("  expr: {}-{}\n", .{ varn.ty_node.file, varn.ty_node.index });
+                std.debug.print("  declared index: {}\n", .{varn.declared_index});
+                std.debug.print("  index: {}\n", .{varn.index});
+                std.debug.print("  partial: {}\n", .{varn.partial});
+
+                if (varn.init) |init| {
+                    std.debug.print("  init: {}\n", .{init});
+                }
             },
             .@"break" => |brk| {
                 if (brk.expr) |expr| {
@@ -196,6 +206,13 @@ pub const InstructionKind = union(enum) {
         expr: InstructionId,
         index: usize,
     },
+    variant: struct {
+        ty_node: node.NodeId,
+        declared_index: usize,
+        index: usize,
+        partial: bool,
+        init: ?InstructionId,
+    },
     @"break": struct {
         expr: ?InstructionId,
     },
@@ -256,6 +273,7 @@ pub const Evaluator = struct {
     eval_const: bool,
     instr_to_node: std.AutoHashMap(InstructionId, node.NodeId),
 
+    variant_instr: ?InstructionId = null,
     greedy: bool = true,
     make_ref: bool = false,
 
@@ -433,33 +451,86 @@ pub const Evaluator = struct {
 
                 switch (expr.op) {
                     .member_access => {
-                        var left_ty = self.typechecker.types.get(expr.left).?;
+                        var ref_ns_type = false;
+                        var orig_ty = self.typechecker.types.get(expr.left).?;
                         const rhs = self.nodes[expr.right.index].kind.identifier;
 
-                        left_ty = left_ty.unwrapToRefBase();
+                        var left_ty = orig_ty.unwrapToRefBase();
 
-                        while (left_ty.* == .named) {
-                            left_ty = self.typechecker.declared_types.get(left_ty.named).?.owned_type.base;
+                        while (left_ty.* == .named or left_ty.* == .owned_type) {
+                            switch (left_ty.*) {
+                                .named => left_ty = self.typechecker.declared_types.get(left_ty.named).?.owned_type.base,
+                                .owned_type => {
+                                    orig_ty = self.typechecker.interner.namedTy(left_ty.owned_type.binding);
+                                    left_ty = left_ty.owned_type.base;
+                                    ref_ns_type = true;
+                                },
+                                else => unreachable,
+                            }
                         }
 
                         left_ty = left_ty.unwrapToRefBase();
 
-                        switch (left_ty.*) {
-                            .record => |rec| {
-                                const fields_index = rec.fields.multi_type_keyed_impl;
-                                const fields = &self.typechecker.interner.multi_types_keyed.items[fields_index];
+                        if (ref_ns_type) {
+                            switch (left_ty.*) {
+                                .@"union" => |un| {
+                                    const variant_index = un.variants.multi_type_keyed_impl;
+                                    const variants = &self.typechecker.interner.multi_types_keyed.items[variant_index];
+                                    const variant_indicies = self.typechecker.interner.multi_types.items[un.indicies.multi_type_impl.start .. un.indicies.multi_type_impl.start + un.indicies.multi_type_impl.len];
+                                    const var_index = variants.getIndex(rhs).?;
 
-                                break :blk try self.createInstruction(.{
-                                    .member_access = .{
-                                        .expr = lvalid,
-                                        .index = fields.getIndex(rhs).?,
-                                    },
-                                });
-                            },
-                            else => {
-                                // self.d.addErr(node_id, "LHS does not support field access!", .{}, .{});
-                                break :blk try self.createConst(.undef);
-                            },
+                                    const partial = variants.values()[var_index].* != .unit and self.variant_instr != null;
+
+                                    break :blk try self.createInstruction(.{
+                                        .variant = .{
+                                            .ty_node = orig_ty.named,
+                                            .declared_index = var_index,
+                                            .index = variant_indicies[var_index].simple_int_value,
+                                            .init = self.variant_instr,
+                                            .partial = partial,
+                                        },
+                                    });
+                                },
+                                else => {
+                                    const left_ty_str = self.typechecker.interner.printTyToStr(left_ty, self.arena);
+                                    std.log.err("Type: {s}", .{left_ty_str});
+                                    // self.d.addErr(node_id, "LHS does not support field access!", .{}, .{});
+                                    break :blk try self.createConst(.undef);
+                                },
+                            }
+                        } else {
+                            switch (left_ty.*) {
+                                .record => |rec| {
+                                    const fields_index = rec.fields.multi_type_keyed_impl;
+                                    const fields = &self.typechecker.interner.multi_types_keyed.items[fields_index];
+
+                                    break :blk try self.createInstruction(.{
+                                        .member_access = .{
+                                            .expr = lvalid,
+                                            .index = fields.getIndex(rhs).?,
+                                        },
+                                    });
+                                },
+                                .@"union" => |un| {
+                                    const variant_index = un.variants.multi_type_keyed_impl;
+                                    const variants = &self.typechecker.interner.multi_types_keyed.items[variant_index];
+                                    // const variant_indicies = self.typechecker.interner.multi_types.items[un.indicies.multi_type_impl.start .. un.indicies.multi_type_impl.start + un.indicies.multi_type_impl.len];
+                                    const var_index = variants.getIndex(rhs).?;
+
+                                    break :blk try self.createInstruction(.{
+                                        .member_access = .{
+                                            .expr = lvalid,
+                                            .index = var_index,
+                                        },
+                                    });
+                                },
+                                else => {
+                                    const left_ty_str = self.typechecker.interner.printTyToStr(left_ty, self.arena);
+                                    std.log.err("Type: {s}", .{left_ty_str});
+                                    // self.d.addErr(node_id, "LHS does not support field access!", .{}, .{});
+                                    break :blk try self.createConst(.undef);
+                                },
+                            }
                         }
                     },
                     else => {},
@@ -956,6 +1027,35 @@ pub const Evaluator = struct {
 
                 // @TODO: return value here
                 break :blk null;
+            },
+            .variant_init => |vi| blk: {
+                const old_val_instr = self.variant_instr;
+                defer self.variant_instr = old_val_instr;
+
+                self.variant_instr = try self.evalNode(vi.init);
+                break :blk try self.evalNode(vi.variant);
+            },
+            .implicit_variant => |iv| blk: {
+                const union_named_ty = self.typechecker.types.get(id).?.named;
+                const union_ty = self.typechecker.declared_types.get(union_named_ty).?.owned_type.base.@"union";
+
+                const variant_index = union_ty.variants.multi_type_keyed_impl;
+                const variants = &self.typechecker.interner.multi_types_keyed.items[variant_index];
+                const variant_indicies = self.typechecker.interner.multi_types.items[union_ty.indicies.multi_type_impl.start .. union_ty.indicies.multi_type_impl.start + union_ty.indicies.multi_type_impl.len];
+                const var_index = variants.getIndex(iv.ident).?;
+
+                // @TODO: maybe we should check if unit type
+                const partial = self.variant_instr == null;
+
+                break :blk try self.createInstruction(.{
+                    .variant = .{
+                        .ty_node = union_named_ty,
+                        .declared_index = var_index,
+                        .index = variant_indicies[var_index].simple_int_value,
+                        .init = self.variant_instr,
+                        .partial = partial,
+                    },
+                });
             },
             // @TODO: Maybe do something with key here?
             .key_value => |kv| try self.evalNode(kv.value),

@@ -64,12 +64,12 @@ pub const Parser = struct {
             return .{ node.NodeRange{
                 .start = @truncate(self.node_ranges.items.len),
                 .len = 0,
-            }, ob_tok[0], tok[0] };
+            }, ob_tok[0], tok };
         }
         const block = try self.parseBlock();
-        cb_tok = try self.expect(.close_brace);
+        cb_tok = (try self.expect(.close_brace))[0];
 
-        return .{ block, ob_tok[0], cb_tok.?[0] };
+        return .{ block, ob_tok[0], cb_tok.? };
     }
 
     pub fn parseBlock(self: *Self) !node.NodeRange {
@@ -130,7 +130,7 @@ pub const Parser = struct {
         else
             null;
 
-        return self.parseBindingWithType(ty, if (let_tok) |l| l[0] else null);
+        return self.parseBindingWithType(ty, let_tok);
     }
 
     pub fn parseBindingWithType(self: *Self, ty_node_id: ?node.NodeId, let_tok: ?tokenize.TokenId) !node.NodeId {
@@ -150,7 +150,7 @@ pub const Parser = struct {
         }, .{
             .binding = .{
                 .let_tok = let_tok,
-                .mut_tok = if (mutable) |m| m[0] else null,
+                .mut_tok = mutable,
                 .name_tok = name[0],
                 .eq_tok = eq[0],
             },
@@ -168,9 +168,11 @@ pub const Parser = struct {
     pub fn parseBinExprWithLeft(self: *Self, left_id: node.NodeId, last_prec: u8) ParseError!node.NodeId {
         var left = left_id;
         // var next_last_prec = last_prec;
-        left = try self.parsePostExpr(last_prec, left);
+        std.log.warn("Expr {}", .{last_prec});
 
         while (true) {
+            left = try self.parsePostExpr(last_prec, left);
+
             const op_tok = self.lexer.peek() orelse break;
             const op = node.Operator.fromTokenKind(op_tok.kind) orelse break;
 
@@ -206,6 +208,18 @@ pub const Parser = struct {
             tok = self.peekNoNL();
 
             switch (tok.?.kind) {
+                .coloncolon => {
+                    const col_tok = self.next().?;
+                    std.log.warn("FGoing colon", .{});
+                    const expr = try self.parseBinExpr(postPrec(op));
+
+                    left = try self.createNode(.{
+                        .variant_init = .{
+                            .variant = left,
+                            .init = expr,
+                        },
+                    }, .{ .single = col_tok.id });
+                },
                 .open_paren => {
                     // parseInvoke
                     const op_tok = self.next();
@@ -363,11 +377,11 @@ pub const Parser = struct {
                         }, .{
                             .type_record = .{
                                 .ty_tok = ty_tok.?.id,
-                                .open_paren_tok = if (op_tok) |tk| tk[0] else null,
+                                .open_paren_tok = op_tok,
                                 .close_paren_tok = cp_tok,
 
-                                .open_bracket_tok = ob_tok[0],
-                                .close_bracket_tok = cb_tok[0],
+                                .open_bracket_tok = ob_tok,
+                                .close_bracket_tok = cb_tok,
                             },
                         });
                     }
@@ -385,10 +399,10 @@ pub const Parser = struct {
                         .type_record = .{
                             .ty_tok = ty_tok.?.id,
 
-                            .open_paren_tok = if (op_tok) |tk| tk[0] else null,
+                            .open_paren_tok = op_tok,
                             .close_paren_tok = cp_tok,
 
-                            .open_bracket_tok = ob_tok[0],
+                            .open_bracket_tok = ob_tok,
                             .close_bracket_tok = cb_tok[0],
                         },
                     });
@@ -425,7 +439,7 @@ pub const Parser = struct {
                         .type_union = .{
                             .ty_tok = ty_tok.?.id,
 
-                            .open_paren_tok = if (op_tok) |tk| tk[0] else null,
+                            .open_paren_tok = op_tok,
                             .close_paren_tok = cp_tok,
                         },
                     });
@@ -456,7 +470,7 @@ pub const Parser = struct {
 
                     return self.parseFuncWithParams(params, op_tok.?.id, this_cp_tok[0]);
                 } else if (expr == null) {
-                    return self.parseFuncWithParams(null, op_tok.?.id, cp_tok.?[0]);
+                    return self.parseFuncWithParams(null, op_tok.?.id, cp_tok.?);
                 }
 
                 _ = try self.expect(.close_paren);
@@ -487,7 +501,7 @@ pub const Parser = struct {
                                 .key = expr,
                                 .value = val,
                             },
-                        }, .{ .single = colon_tok.?[0] });
+                        }, .{ .single = colon_tok.? });
 
                         try these_nodes.append(next_expr);
                     } else {
@@ -509,7 +523,7 @@ pub const Parser = struct {
                                     .key = next_expr,
                                     .value = this_value,
                                 },
-                            }, .{ .single = nx_tok[0] });
+                            }, .{ .single = nx_tok });
 
                             if (!is_record) {
                                 std.log.err("Expected record field but found single expression!", .{});
@@ -551,7 +565,7 @@ pub const Parser = struct {
                     },
                 }, .{
                     .array_init_or_slice_one = .{
-                        .mut_tok = if (mut) |m| m[0] else null,
+                        .mut_tok = mut,
                         .open_bracket_tok = ob_tok.?.id,
                         .close_bracket_tok = cb_tok[0],
                     },
@@ -594,7 +608,7 @@ pub const Parser = struct {
                         .open_brace_tok = true_block[1],
                         .close_brace_tok = true_block[2],
 
-                        .else_tok = if (else_tok) |et| et[0] else null,
+                        .else_tok = else_tok,
                         .else_open_brace_tok = if (false_block) |fb| fb[1] else null,
                         .else_close_brace_tok = if (false_block) |fb| fb[2] else null,
                     },
@@ -663,11 +677,11 @@ pub const Parser = struct {
                         .open_brace_tok = loop_block[1],
                         .close_brace_tok = loop_block[2],
 
-                        .else_tok = if (else_tok) |et| et[0] else null,
+                        .else_tok = else_tok,
                         .else_open_brace_tok = if (else_block) |eb| eb[1] else null,
                         .else_close_brace_tok = if (else_block) |eb| eb[2] else null,
 
-                        .finally_tok = if (finally_tok) |ft| ft[0] else null,
+                        .finally_tok = finally_tok,
                         .finally_open_brace_tok = if (finally_block) |fb| fb[1] else null,
                         .finally_close_brace_tok = if (finally_block) |fb| fb[2] else null,
                     },
@@ -715,7 +729,7 @@ pub const Parser = struct {
             node.NodeRange{ .start = @truncate(self.node_ranges.items.len), .len = 0 }
         else blk: {
             const block = try self.parseBlock();
-            cb_tok = try self.expect(.close_brace);
+            cb_tok = (try self.expect(.close_brace))[0];
             break :blk block;
         };
 
@@ -731,7 +745,7 @@ pub const Parser = struct {
                     .open_paren_tok = op_tok,
                     .close_paren_tok = cp_tok,
                     .open_brace_tok = ob_tok[0],
-                    .close_brace_tok = cb_tok.?[0],
+                    .close_brace_tok = cb_tok.?,
                 },
             });
         } else {
@@ -745,7 +759,7 @@ pub const Parser = struct {
                     .open_paren_tok = op_tok,
                     .close_paren_tok = cp_tok,
                     .open_brace_tok = ob_tok[0],
-                    .close_brace_tok = cb_tok.?[0],
+                    .close_brace_tok = cb_tok.?,
                 },
             });
         }
@@ -770,7 +784,7 @@ pub const Parser = struct {
         }, .{
             .record_field = .{
                 .name_tok = name[0],
-                .eq_tok = if (eq_tok) |eq| eq[0] else null,
+                .eq_tok = eq_tok,
             },
         });
     }
@@ -780,11 +794,12 @@ pub const Parser = struct {
         return self.parseUnionVariantFirstExpr(first, pipe_tok);
     }
 
-    pub fn parseUnionVariantFirstExpr(self: *Self, first: node.NodeId, pipe_tok: ?tokenize.TokenId) !node.NodeId {
-        const name = if (self.nextIsNoNL(.newline) or !self.hasNext() or self.nextIs(.pipe) or self.nextIs(.assign))
-            first
-        else
-            try self.parseLiteral();
+    pub fn parseUnionVariantFirstExpr(self: *Self, _first: node.NodeId, pipe_tok: ?tokenize.TokenId) !node.NodeId {
+        var first: ?node.NodeId = _first;
+        const name = if (!self.hasNext() or self.nextIs(.pipe) or self.nextIs(.assign) or self.nextIsNoNLResync(.newline)) blk: {
+            first = null;
+            break :blk _first;
+        } else try self.parseLiteral();
 
         const eq_tok = self.consumeIfIs(.assign);
         const index = if (eq_tok != null)
@@ -801,14 +816,29 @@ pub const Parser = struct {
         }, .{
             .union_variant = .{
                 .pipe_tok = pipe_tok,
-                .eq_tok = if (eq_tok) |eq| eq[0] else null,
+                .eq_tok = eq_tok,
             },
         });
     }
 
     pub fn parseLiteral(self: *Self) !node.NodeId {
+        if (self.consumeIfIs(.dot)) |dot_tok| {
+            const ident = try self.expect(.identifier);
+            return try self.createNode(.{
+                .implicit_variant = .{
+                    .ident = ident[1],
+                },
+            }, .{
+                .implicit_variant = .{
+                    .dot_tok = dot_tok,
+                    .ident_tok = ident[0],
+                },
+            });
+        }
+
         const tok = self.peek() orelse return error.UnexpectedEnd;
         std.log.debug("Literal: {}", .{tok});
+
         return switch (tok.kind) {
             .int_literal => |value| self.createNodeAndNext(.{ .int_literal = value }),
             .float_literal => |value| self.createNodeAndNext(.{ .float_literal = value }),
@@ -820,6 +850,7 @@ pub const Parser = struct {
             .int => |size| self.createNodeAndNext(.{ .type_int = size }),
             .uint => |size| self.createNodeAndNext(.{ .type_uint = size }),
             .float => |size| self.createNodeAndNext(.{ .type_float = size }),
+            .bool => self.createNodeAndNext(.type_bool),
             else => error.UnexpectedToken,
         };
     }
@@ -852,6 +883,8 @@ pub const Parser = struct {
     pub fn parseArgument(self: *Self) !node.NodeId {
         const val = try self.parseKvOrExpr();
         if (self.nodes.items[val.index].kind != .key_value and self.nodes.items[val.index].kind != .key_value_ident) {
+            if (self.node_tokens.items.len == 255) @breakpoint();
+            std.log.err("{}", .{self.node_tokens.items.len});
             return self.createNode(.{ .argument = val }, self.node_tokens.items[val.index]);
         }
         return val;
@@ -873,7 +906,7 @@ pub const Parser = struct {
                 }, .{
                     .key_value_ident = .{
                         .name_tok = self.node_tokens.items[first.index].single,
-                        .colon_tok = colon_tok[0],
+                        .colon_tok = colon_tok,
                     },
                 });
             }
@@ -883,7 +916,7 @@ pub const Parser = struct {
                     .key = first,
                     .value = value,
                 },
-            }, .{ .single = colon_tok[0] });
+            }, .{ .single = colon_tok });
         }
 
         return first;
@@ -913,9 +946,9 @@ pub const Parser = struct {
             },
         }, .{
             .parameter = .{
-                .spread_tok = if (spread) |s| s[0] else null,
+                .spread_tok = spread,
                 .name_tok = ident[0],
-                .eq_tok = if (eq_tok) |eq| eq[0] else null,
+                .eq_tok = eq_tok,
             },
         });
     }
@@ -958,14 +991,11 @@ pub const Parser = struct {
         }
     }
 
-    inline fn consumeIfIs(self: *Self, comptime kind: std.meta.FieldEnum(tokenize.TokenKind)) ?struct {
-        tokenize.TokenId,
-        std.meta.FieldType(tokenize.TokenKind, kind),
-    } {
+    inline fn consumeIfIs(self: *Self, comptime kind: std.meta.FieldEnum(tokenize.TokenKind)) ?tokenize.TokenId {
         const tok = self.peek() orelse return null;
         if (tok.kind == kind) {
             _ = self.next();
-            return .{ self.lexer.lastIndex(), @field(tok.kind, @tagName(kind)) };
+            return self.lexer.lastIndex();
         }
 
         return null;
@@ -977,6 +1007,12 @@ pub const Parser = struct {
     }
 
     inline fn nextIsNoNL(self: *Self, comptime kind: std.meta.FieldEnum(tokenize.TokenKind)) bool {
+        const tok = self.peekNoNL() orelse return false;
+        return tok.kind == kind;
+    }
+
+    inline fn nextIsNoNLResync(self: *Self, comptime kind: std.meta.FieldEnum(tokenize.TokenKind)) bool {
+        self.lexer.resync();
         const tok = self.peekNoNL() orelse return false;
         return tok.kind == kind;
     }
@@ -1047,12 +1083,13 @@ pub const Parser = struct {
             .index = @truncate(index),
         };
 
+        // @TODO: fix memory bug
+        try self.node_tokens.append(tokens);
+
         try self.nodes.append(.{
             .id = id,
             .kind = kind,
         });
-
-        try self.node_tokens.append(tokens);
 
         return id;
     }
@@ -1097,6 +1134,7 @@ fn postPrec(op: node.Operator) u8 {
         .opt => 81,
 
         .deref, .take_ref => 81,
+        .colon => 20,
         else => 0,
     };
 }

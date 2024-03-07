@@ -18,6 +18,7 @@ pub const TokenKind = union(enum) {
     newline,
     comma,
     colon,
+    coloncolon,
     assign,
     arrow,
     spread,
@@ -260,7 +261,10 @@ pub const Lexer = struct {
                 break :blk .{ .newline, 1 };
             },
             ',' => .{ .comma, 1 },
-            ':' => .{ .colon, 1 },
+            ':' => if (self.source.len > (self.position + 1) and self.source[self.position + 1] == ':')
+                .{ .coloncolon, 2 }
+            else
+                .{ .colon, 1 },
             '=' => if (self.source.len > (self.position + 1))
                 switch (self.source[self.position + 1]) {
                     '>' => .{ .arrow, 2 },

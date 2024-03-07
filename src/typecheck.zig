@@ -28,6 +28,7 @@ pub const BaseType = union(enum) {
     @"union": struct {
         backing_field: ?Type,
         variants: Type,
+        indicies: Type,
     },
     alias: Type,
     named: node.NodeId,
@@ -47,6 +48,8 @@ pub const BaseType = union(enum) {
         params: Type,
         ret_ty: ?Type,
     },
+
+    simple_int_value: usize,
 
     pub fn unwrapType(self: Type) Type {
         if (self.* != .type) {
@@ -245,12 +248,18 @@ pub const TypeInterner = struct {
         });
     }
 
-    pub fn unionTy(self: *Self, backing_field: ?Type, variants: std.StringArrayHashMap(Type)) Type {
+    pub fn unionTy(self: *Self, backing_field: ?Type, variants: std.StringArrayHashMap(Type), indicies: []const Type) Type {
+        // var index_map = std.ArrayList(Type).init(self.arena);
+        // for (indicies) |ind| {
+        //     index_map.append(self.createOrGetTy(.{ .simple_int_value = ind })) catch @panic("memory alloc error");
+        // }
         const variant_tys = self.multiTyKeyed(variants);
+        const index_tys = self.multiTy(indicies);
         return self.createOrGetTy(.{
             .@"union" = .{
                 .backing_field = backing_field,
                 .variants = variant_tys,
+                .indicies = index_tys,
             },
         });
     }
@@ -458,6 +467,9 @@ pub const TypeInterner = struct {
                     try writer.print("none", .{});
                 }
             },
+            .simple_int_value => |val| {
+                try writer.print("{}", .{val});
+            },
         }
     }
 
@@ -495,7 +507,9 @@ pub const TypeChecker = struct {
     ty_hint: ?Type = null,
     last_ref: ?node.NodeId = null,
     evaluator: *eval.Evaluator = undefined,
+    make_sym_ref: bool = false,
     greedy_symbols: bool = false,
+    variant_node: ?node.NodeId = null,
 
     const Self = @This();
 
@@ -616,6 +630,12 @@ pub const TypeChecker = struct {
                     declared_ty.?.type
                 else
                     declared_ty;
+
+                // declared_ty = if (declared_ty) |dty| switch (dty.*) {
+                //     .owned_type => |base| self.interner.namedTy(base.binding),
+                //     else => declared_ty,
+                // } else declared_ty;
+
                 // else if (declared_ty == null)
                 //     null
                 // else {
@@ -659,10 +679,10 @@ pub const TypeChecker = struct {
                 self.last_ref = ref_node;
                 if (self.types.get(ref_node)) |ty| break :blk ty;
                 if (self.declared_types.get(ref_node)) |ty| {
-                    break :blk switch (ty.*) {
+                    break :blk if (!self.make_sym_ref) switch (ty.*) {
                         .owned_type => |base| self.interner.namedTy(base.binding),
                         else => ty,
-                    };
+                    } else ty;
                 }
 
                 std.log.info("Note: Identifier reference hasn't been checked yet. Doing this manually (Is this fine?)'", .{});
@@ -671,10 +691,10 @@ pub const TypeChecker = struct {
 
                 if (self.types.get(ref_node)) |ty| break :blk ty;
                 if (self.declared_types.get(ref_node)) |ty| {
-                    break :blk switch (ty.*) {
+                    break :blk if (!self.make_sym_ref) switch (ty.*) {
                         .owned_type => |base| self.interner.namedTy(base.binding),
                         else => ty,
-                    };
+                    } else ty;
                 }
                 std.log.err("Unable to resolve identifier type info!", .{});
 
@@ -685,47 +705,96 @@ pub const TypeChecker = struct {
             .bool_literal => |_| return self.interner.boolTy(),
             .string_literal => |_| return self.interner.strTy(),
             .binary_expr => |expr| blk: {
-                var left_ty = try self.typeCheckNode(expr.left);
-                const old_hint = self.ty_hint;
-                defer self.ty_hint = old_hint;
-
                 switch (expr.op) {
-                    .assign,
-                    .plus_eq,
-                    .minus_eq,
-                    .times_eq,
-                    .divide_eq,
-                    .bitor_eq,
-                    .bitxor_eq,
-                    => {
-                        self.ty_hint = left_ty;
-                    },
                     .member_access => {
+                        const old_make_sym_ref = self.make_sym_ref;
+                        defer self.make_sym_ref = old_make_sym_ref;
+                        self.make_sym_ref = true;
+
+                        var orig_ty = try self.typeCheckNode(expr.left);
+                        var ref_ns_type = false;
                         const rhs = self.nodes[expr.right.index].kind.identifier;
 
-                        left_ty = left_ty.unwrapToRefBase();
+                        var left_ty = orig_ty.unwrapToRefBase();
 
-                        while (left_ty.* == .named) {
-                            left_ty = self.declared_types.get(left_ty.named).?.owned_type.base;
+                        while (left_ty.* == .named or left_ty.* == .owned_type) {
+                            switch (left_ty.*) {
+                                .named => left_ty = self.declared_types.get(left_ty.named).?.owned_type.base,
+                                .owned_type => {
+                                    orig_ty = self.interner.namedTy(left_ty.owned_type.binding);
+                                    left_ty = left_ty.owned_type.base;
+                                    ref_ns_type = true;
+                                },
+                                else => unreachable,
+                            }
                         }
 
                         left_ty = left_ty.unwrapToRefBase();
 
-                        switch (left_ty.*) {
-                            .record => |rec| {
-                                const fields_index = rec.fields.multi_type_keyed_impl;
-                                const fields = &self.interner.multi_types_keyed.items[fields_index];
+                        if (ref_ns_type) {
+                            switch (left_ty.*) {
+                                .@"union" => |un| {
+                                    const variant_index = un.variants.multi_type_keyed_impl;
+                                    const variants = &self.interner.multi_types_keyed.items[variant_index];
 
-                                break :blk fields.get(rhs).?;
-                            },
-                            else => {
-                                self.d.addErr(node_id, "LHS does not support field access!", .{}, .{});
-                                return self.interner.unitTy();
-                            },
+                                    const this_var = variants.get(rhs).?;
+                                    if (this_var.* == .unit) {
+                                        break :blk orig_ty;
+                                    } else if (self.variant_node) |var_val_node| {
+                                        const old_hint = self.ty_hint;
+                                        defer self.ty_hint = old_hint;
+                                        self.ty_hint = this_var;
+
+                                        const val_ty = try self.typeCheckNode(var_val_node);
+
+                                        if (!self.coerceNode(var_val_node, val_ty, this_var)) {
+                                            const declared_ty_str = self.interner.printTyToStr(this_var, self.arena);
+                                            const ty_str = self.interner.printTyToStr(val_ty, self.arena);
+
+                                            self.d.addErr(node_id, "Type of union initializer does not match variant type! \nDeclared type:\n  {s}\nInitial value type:\n  {s}\n", .{ declared_ty_str, ty_str }, .{});
+                                        }
+                                    }
+
+                                    break :blk orig_ty;
+                                },
+                                else => {
+                                    const ty_str = self.interner.printTyToStr(left_ty, self.arena);
+                                    self.d.addErr(node_id, "LHS does not support field access! Type: {s}", .{ty_str}, .{});
+                                    return self.interner.unitTy();
+                                },
+                            }
+                        } else {
+                            switch (left_ty.*) {
+                                .record => |rec| {
+                                    const fields_index = rec.fields.multi_type_keyed_impl;
+                                    const fields = &self.interner.multi_types_keyed.items[fields_index];
+
+                                    break :blk fields.get(rhs).?;
+                                },
+                                .@"union" => |un| {
+                                    const variant_index = un.variants.multi_type_keyed_impl;
+                                    const variants = &self.interner.multi_types_keyed.items[variant_index];
+
+                                    const this_var = variants.get(rhs).?;
+                                    break :blk this_var;
+                                },
+                                else => {
+                                    const ty_str = self.interner.printTyToStr(left_ty, self.arena);
+                                    self.d.addErr(node_id, "LHS does not support field access! Type: {s}", .{ty_str}, .{});
+                                    return self.interner.unitTy();
+                                },
+                            }
                         }
                     },
                     else => {},
                 }
+
+                const left_ty = try self.typeCheckNode(expr.left);
+
+                const old_hint = self.ty_hint;
+                defer self.ty_hint = old_hint;
+
+                self.ty_hint = left_ty;
 
                 const right_ty = try self.typeCheckNode(expr.right);
 
@@ -769,6 +838,12 @@ pub const TypeChecker = struct {
 
                 for (nodes) |id| {
                     const param_ty = try self.typeCheckNode(id);
+
+                    //                     param_ty = if (param_ty) |dty| switch (dty.*) {
+                    //                         .owned_type => |base| self.interner.namedTy(base.binding),
+                    //                         else => param_ty,
+                    //                     } else param_ty;
+
                     try param_tys.append(param_ty);
                 }
 
@@ -1060,6 +1135,37 @@ pub const TypeChecker = struct {
                 }
                 break :blk self.interner.unitTy();
             },
+            .variant_init => |vi| blk: {
+                const old_var_init = self.variant_node;
+                defer self.variant_node = old_var_init;
+                self.variant_node = vi.init;
+
+                break :blk try self.typeCheckNode(vi.variant);
+            },
+            .implicit_variant => |iv| blk: {
+                const union_ty = self.declared_types.get(self.ty_hint.?.named).?.owned_type.base.@"union";
+
+                const variant_index = union_ty.variants.multi_type_keyed_impl;
+                const variants = &self.interner.multi_types_keyed.items[variant_index];
+
+                const this_var = variants.get(iv.ident).?;
+                if (this_var.* == .unit) {} else if (self.variant_node) |var_val_node| {
+                    const old_hint = self.ty_hint;
+                    defer self.ty_hint = old_hint;
+                    self.ty_hint = this_var;
+
+                    const val_ty = try self.typeCheckNode(var_val_node);
+
+                    if (!self.coerceNode(var_val_node, val_ty, this_var)) {
+                        const declared_ty_str = self.interner.printTyToStr(this_var, self.arena);
+                        const ty_str = self.interner.printTyToStr(val_ty, self.arena);
+
+                        self.d.addErr(node_id, "Type of union initializer does not match variant type! \nDeclared type:\n  {s}\nInitial value type:\n  {s}\n", .{ declared_ty_str, ty_str }, .{});
+                    }
+                }
+
+                break :blk self.ty_hint.?;
+            },
             .parameter => |param| blk: {
                 const ty = try self.typeCheckNode(param.ty);
 
@@ -1141,19 +1247,9 @@ pub const TypeChecker = struct {
                     const value_expr = if (expr.value) |val| blk1: {
                         _ = try self.typeCheckNode(val);
 
-                        const save_point = self.evaluator.save();
-                        const old_ec = self.evaluator.eval_const;
-                        self.evaluator.eval_const = true;
-                        const value_id = try self.evaluator.evalNode(val);
-                        self.evaluator.eval_const = old_ec;
+                        const value = try self.evalConstValue(val);
 
-                        const value = if (value_id) |id| self.evaluator.instructions.items[id.index] else null;
-                        if (value_id == null or value.?.kind != .constant or value.?.value.?.kind != .int) {
-                            std.log.err("Expected constant int for array type size!", .{});
-                        }
-                        self.evaluator.reset(save_point);
-
-                        break :blk1 value.?.value.?.kind.int;
+                        break :blk1 value.kind.int;
                     } else null;
 
                     if (expr_ty.* == .type) {
@@ -1245,11 +1341,13 @@ pub const TypeChecker = struct {
                 break :blk self.interner.typeTy(self.interner.recordTy(backing_field_ty, fields));
             },
             .type_union => |uni| blk: {
-                const backing_field_ty = if (uni.backing_field) |f|
-                    try self.typeCheckNode(f)
-                else
-                    null;
+                const backing_field_ty = if (uni.backing_field) |f| blk1: {
+                    const ty = try self.typeCheckNode(f);
+                    break :blk1 ty.unwrapType();
+                } else null;
                 var variants = std.StringArrayHashMap(Type).init(self.arena);
+                var indicies = std.ArrayList(Type).init(self.arena);
+                var variant_index: u64 = 0;
 
                 const variant_nodes = self.nodesRange(uni.variants);
                 for (variant_nodes) |id| {
@@ -1257,19 +1355,17 @@ pub const TypeChecker = struct {
                     switch (variant_node.kind) {
                         .union_variant => |var_val| {
                             const name_node = self.nodes[var_val.name.index];
-                            const var_ty = if (var_val.ty.eql(var_val.name) and name_node.kind == .identifier)
+                            const var_ty = if (var_val.ty == null)
                                 self.interner.unitTy()
                             else blk1: {
-                                const actual_ty = try self.typeCheckNode(var_val.ty);
+                                const actual_ty = try self.typeCheckNode(var_val.ty.?);
 
-                                break :blk1 if (actual_ty.* == .type) actual_ty.type else {
+                                break :blk1 if (actual_ty.* == .type or actual_ty.* == .named) actual_ty.type else {
                                     std.log.err("Invalid Type", .{});
                                     std.debug.dumpCurrentStackTrace(null);
                                     break :blk1 self.interner.unitTy();
                                 };
                             };
-
-                            // @TODO: imlement indicies
 
                             // @TODO: implement type names
                             const name = if (name_node.kind == .identifier)
@@ -1278,6 +1374,15 @@ pub const TypeChecker = struct {
                                 @panic("Unimplemented");
 
                             try variants.put(name, var_ty);
+
+                            if (var_val.index) |ind| {
+                                const value = try self.evalConstValue(ind);
+                                try indicies.append(self.interner.createOrGetTy(.{ .simple_int_value = @intCast(value.kind.int) }));
+                                variant_index = @as(u64, @intCast(value.kind.int)) + 1;
+                            } else {
+                                try indicies.append(self.interner.createOrGetTy(.{ .simple_int_value = variant_index }));
+                                variant_index += 1;
+                            }
                         },
                         else => {
                             _ = try self.typeCheckNode(id);
@@ -1285,7 +1390,7 @@ pub const TypeChecker = struct {
                     }
                 }
 
-                break :blk self.interner.typeTy(self.interner.unionTy(backing_field_ty, variants));
+                break :blk self.interner.typeTy(self.interner.unionTy(backing_field_ty, variants, indicies.items));
             },
             .type_ref => |ty| blk: {
                 const base_ty = try self.typeCheckNode(ty.ty);
@@ -1336,7 +1441,23 @@ pub const TypeChecker = struct {
         return ty;
     }
 
-    pub fn unwrapNamedTy(self: *Self, ty: Type) Type {
+    fn evalConstValue(self: *Self, val: node.NodeId) !eval.Value {
+        const save_point = self.evaluator.save();
+        const old_ec = self.evaluator.eval_const;
+        self.evaluator.eval_const = true;
+        const value_id = try self.evaluator.evalNode(val);
+        self.evaluator.eval_const = old_ec;
+
+        const value = if (value_id) |id| self.evaluator.instructions.items[id.index] else null;
+        if (value_id == null or value.?.kind != .constant or value.?.value.?.kind != .int) {
+            std.log.err("Expected constant int for array type size!", .{});
+        }
+        self.evaluator.reset(save_point);
+
+        return value.?.value.?;
+    }
+
+    pub fn unwrapNamedTy(self: *const Self, ty: Type) Type {
         var base = ty;
 
         while (base.* == .named) {

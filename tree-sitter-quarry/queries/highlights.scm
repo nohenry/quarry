@@ -45,6 +45,8 @@
   (identifier) @constant
 )
 
+(type (expression (identifier) @type (#match? "^[A-Z][a-zA-Z0-9_]+")))
+
 (file_item (type (expression (identifier) @attribute (#match? "^:[a-zA-Z0-9]+"))))
 
 [

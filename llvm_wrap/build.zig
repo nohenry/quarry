@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 
 pub const Package = struct {
     llvm_wrap: *std.Build.Module,
@@ -63,6 +64,8 @@ pub fn package(
             }
             if (std.mem.endsWith(u8, name, ".dylib")) {
                 name = std.mem.trim(u8, name[0 .. name.len - 6], &std.ascii.whitespace);
+            } else if (std.mem.endsWith(u8, name, ".so")) {
+                name = std.mem.trim(u8, name[0 .. name.len - 3], &std.ascii.whitespace);
             }
 
             llvm_wrap_c.linkSystemLibrary(name);
@@ -81,13 +84,21 @@ pub fn package(
         }
     }
 
-    // TODO: Use the old damping method for now otherwise there is a hang in powf().
-    llvm_wrap_c.addCSourceFiles(.{
-        .files = &.{
-            thisDir() ++ "/src/llvm_wrap.cpp",
-        },
-        .flags = llvm_args.items,
-    });
+    if (builtin.os.tag == .linux) {
+        llvm_wrap_c.addCSourceFiles(.{
+            .files = &.{
+                "llvm_wrap/src/llvm_wrap.cpp",
+            },
+            .flags = llvm_args.items,
+        });
+    } else {
+        llvm_wrap_c.addCSourceFiles(.{
+            .files = &.{
+                thisDir() ++ "/src/llvm_wrap.cpp",
+            },
+            .flags = llvm_args.items,
+        });
+    }
 
     return .{
         .llvm_wrap = llvm_wrap,

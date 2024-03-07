@@ -137,6 +137,14 @@ pub const Node = struct {
             .const_block => |cexpr| {
                 std.debug.print("  block: {}-{}\n", .{ cexpr.block.start, cexpr.block.start + cexpr.block.len });
             },
+
+            .variant_init => |varin| {
+                std.debug.print("  variant: {}-{}\n", .{ varin.variant.file, varin.variant.index });
+                std.debug.print("  init: {}-{}\n", .{ varin.init.file, varin.init.index });
+            },
+            .implicit_variant => |iv| {
+                std.debug.print("  value: {s}\n", .{iv.ident});
+            },
             .array_init_or_slice_one => |value| {
                 std.debug.print("  expr: {}-{}\n", .{ value.expr.file, value.expr.index });
                 if (value.value) |val| {
@@ -162,7 +170,10 @@ pub const Node = struct {
                 std.debug.print("  fields: {}-{}\n", .{ rec.fields.start, rec.fields.start + rec.fields.len });
             },
             .union_variant => |vari| {
-                std.debug.print("  ty: {}-{}\n", .{ vari.ty.file, vari.ty.index });
+                if (vari.ty) |ty| {
+                    std.debug.print("  ty: {}-{}\n", .{ ty.file, ty.index });
+                }
+
                 std.debug.print("  name: {}-{}\n", .{ vari.name.file, vari.name.index });
                 if (vari.index) |ind| {
                     std.debug.print("  index: {}-{}\n", .{ ind.file, ind.index });
@@ -289,6 +300,12 @@ pub const NodeKind = union(enum) {
         block: NodeRange,
     },
 
+    variant_init: struct {
+        variant: NodeId,
+        init: NodeId,
+    },
+    implicit_variant: struct { ident: []const u8 },
+
     /// Either an array/record init epxression
     ///  - [1]
     ///  - [a: 1]
@@ -319,7 +336,7 @@ pub const NodeKind = union(enum) {
         variants: NodeRange,
     },
     union_variant: struct {
-        ty: NodeId,
+        ty: ?NodeId,
         name: NodeId,
         index: ?NodeId,
     },
@@ -400,6 +417,10 @@ pub const NodeTokens = union(enum) {
         const_tok: TokenIndex,
         open_brace_tok: TokenIndex,
         close_brace_tok: TokenIndex,
+    },
+    implicit_variant: struct {
+        dot_tok: TokenIndex,
+        ident_tok: TokenIndex,
     },
     array_init_or_slice_one: struct {
         mut_tok: ?TokenIndex,
@@ -500,6 +521,7 @@ pub const Operator = enum {
     lte,
 
     bang,
+    colon,
 
     pub fn fromTokenKind(kind: tokenize.TokenKind) ?Operator {
         return switch (kind) {
@@ -539,7 +561,9 @@ pub const Operator = enum {
             .gte => .gte,
             .lt => .lt,
             .lte => .lte,
+
             .bang => .bang,
+            .coloncolon => .colon,
 
             else => null,
         };

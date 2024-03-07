@@ -95,7 +95,7 @@ pub const CodeGenerator = struct {
             ir.LLVMGetHostCPUName(),
             ir.LLVMGetHostCPUFeatures(),
             ir.LLVMCodeGenLevelNone,
-            ir.LLVMRelocDefault,
+            ir.LLVMRelocPIC,
             ir.LLVMCodeModelDefault,
         );
         const target_data = ir.LLVMCreateTargetDataLayout(target_machine);
@@ -128,9 +128,9 @@ pub const CodeGenerator = struct {
 
         var ty_it = self.evaluator.types.iterator();
         while (ty_it.next()) |ty| {
-            // const path = self.analyzer.node_to_path.get(ty.key_ptr.*) orelse @panic("can't get path");
-            // const name = try self.manglePath(path);
-            const named_struct = ir.LLVMStructCreateNamed(self.context, @as(cstr, "fooo"));
+            const path = self.analyzer.node_to_path.get(ty.key_ptr.*) orelse @panic("can't get path");
+            const name = try self.manglePath(path);
+            const named_struct = ir.LLVMStructCreateNamed(self.context, name.ptr);
 
             const tyty = self.typechecker.types.get(ty.value_ptr.node_id) orelse @panic("Unable to get type for named type");
             // const base_ty = self.typechecker.types.get(tyty.named).?;
@@ -168,7 +168,7 @@ pub const CodeGenerator = struct {
         }
     }
 
-    fn manglePath(self: *Self, path: analyze.Path) ![]const u8 {
+    fn manglePath(self: *Self, path: analyze.Path) ![:0]const u8 {
         var mangled_name = std.ArrayList(u8).init(self.arena);
         var mangled_name_writer = mangled_name.writer();
         if (path.segments.len > 0) {
@@ -181,7 +181,7 @@ pub const CodeGenerator = struct {
         }
         try mangled_name_writer.writeByte(0);
 
-        return mangled_name.items;
+        return mangled_name.items[0 .. mangled_name.items.len - 1 :0];
     }
 
     pub fn genFuncProto(self: *Self, bind_id: node.NodeId, func: eval.FunctionValue) !ir.LLVMValueRef {
@@ -250,7 +250,7 @@ pub const CodeGenerator = struct {
                         const signed: c_int = switch (self.ty_hint.?.*) {
                             .int, .int_literal, .iptr => 1,
                             .uint, .uptr => 0,
-                            else => @panic("Expected int type"),
+                            else => std.debug.panic("Expected int type. Found {s}", .{self.typechecker.interner.printTyToStr(self.ty_hint.?, self.arena)}),
                         };
                         const value = ir.LLVMConstInt(self.llvm_ty_hint.?, @intCast(val), signed);
                         break :blk value;
@@ -410,13 +410,30 @@ pub const CodeGenerator = struct {
             .binary_expr => |binop| {
                 const lhs_node_id = self.evaluator.instr_to_node.get(binop.left) orelse @panic("Unable to get lhs node id");
                 const rhs_node_id = self.evaluator.instr_to_node.get(binop.right) orelse @panic("Unable to get rhs node id");
-                const ty = self.typechecker.types.get(lhs_node_id) orelse
+
+                var ty = self.typechecker.types.get(lhs_node_id) orelse
                     self.typechecker.types.get(rhs_node_id) orelse
                     self.ty_hint orelse
                     @panic("Unable to retrieve type information for node");
 
-                const lhs = try self.genWithTypeHint(ty, genInstr, .{ self, binop.left }) orelse @panic("Unable to get LHS");
-                const rhs = try self.genWithTypeHint(ty, genInstr, .{ self, binop.right }) orelse @panic("Unable to get RHS");
+                const rhs_instr = &self.evaluator.instructions.items[binop.right.index];
+                const variant_partial = rhs_instr.kind == .variant and rhs_instr.kind.variant.partial;
+
+                ty = self.typechecker.unwrapNamedTy(ty);
+
+                const lhs = if (ty.* == .@"union") blk: {
+                    const old_make_ref = self.make_ref;
+                    self.make_ref = old_make_ref;
+                    self.make_ref = true;
+                    break :blk try self.genWithTypeHint(ty, genInstr, .{ self, binop.left }) orelse @panic("Unable to get LHS");
+                } else try self.genWithTypeHint(ty, genInstr, .{ self, binop.left }) orelse @panic("Unable to get LHS");
+
+                const rhs = if (!variant_partial)
+                    try self.genWithTypeHint(ty, genInstr, .{ self, binop.right }) orelse @panic("Unable to get RHS")
+                else
+                    undefined;
+
+                self.typechecker.interner.printTy(ty);
 
                 return switch (ty.*) {
                     // @TODO: think about nuw and nsw
@@ -476,6 +493,34 @@ pub const CodeGenerator = struct {
                         .equal => ir.LLVMBuildICmp(self.builder, ir.LLVMIntEQ, lhs, rhs, @as(cstr, "")),
                         .not_equal => ir.LLVMBuildICmp(self.builder, ir.LLVMIntNE, lhs, rhs, @as(cstr, "")),
                         else => @panic("Unhandled binop operaotr"),
+                    },
+                    .@"union" => blk: {
+                        if (!variant_partial) @panic("Expected partial variant");
+
+                        const rhs_index = rhs_instr.kind.variant.index;
+                        const ll_basety = try self.genType(ty, .{});
+
+                        const ll_backty = ir.LLVMStructGetTypeAtIndex(ll_basety, 0);
+                        var indicies = [_]ir.LLVMValueRef{
+                            ir.LLVMConstInt(ir.LLVMInt64TypeInContext(self.context), 0, 0),
+                            ir.LLVMConstInt(ir.LLVMInt32TypeInContext(self.context), 0, 0),
+                        };
+
+                        const ptr = ir.LLVMBuildInBoundsGEP2(self.builder, ll_basety, lhs, @ptrCast(&indicies), @intCast(indicies.len), @as(cstr, "uni_cmp"));
+                        const lvalue = ir.LLVMBuildLoad2(self.builder, ll_backty, ptr, @as(cstr, ""));
+                        const rvalue = ir.LLVMBuildIntCast2(
+                            self.builder,
+                            ir.LLVMConstInt(self.ptrSizedInt(), rhs_index, 0),
+                            ll_backty,
+                            0,
+                            @as(cstr, ""),
+                        );
+
+                        break :blk switch (binop.op) {
+                            .equal => ir.LLVMBuildICmp(self.builder, ir.LLVMIntEQ, lvalue, rvalue, @as(cstr, "")),
+                            .not_equal => ir.LLVMBuildICmp(self.builder, ir.LLVMIntNE, lvalue, rvalue, @as(cstr, "")),
+                            else => @panic("Unhandled binop operaotr"),
+                        };
                     },
                     else => @panic("Unhandled binop type"),
                 };
@@ -684,7 +729,7 @@ pub const CodeGenerator = struct {
                 try ll_vals.ensureTotalCapacity(arr.exprs.len);
 
                 const llty = try self.genType(base_ty, .{});
-                const llarrty = ir.LLVMArrayType2(llty, node_ty.array.size);
+                const llarrty = ir.LLVMArrayType(llty, @truncate(node_ty.array.size));
                 var is_const: bool = true;
 
                 {
@@ -708,7 +753,7 @@ pub const CodeGenerator = struct {
 
                 if (is_const) {
                     // @TODO: do non const arrays
-                    const arr_value = ir.LLVMConstArray2(llty, ll_vals.items.ptr, ll_vals.items.len);
+                    const arr_value = ir.LLVMConstArray(llty, ll_vals.items.ptr, @truncate(ll_vals.items.len));
                     const global_value = ir.LLVMAddGlobal(self.module, llarrty, @as(cstr, ""));
                     ir.LLVMSetGlobalConstant(global_value, 1);
                     ir.LLVMSetInitializer(global_value, arr_value);
@@ -936,8 +981,126 @@ pub const CodeGenerator = struct {
                             break :blk ir.LLVMBuildLoad2(self.builder, llty, ptr, @as(cstr, ""));
                         }
                     },
+                    .@"union" => {
+                        // @TODO: check tag
+                        // const this_node = self.evaluator.instr_to_node.get(instr_id) orelse @panic("Unable to get lhs node");
+                        // var this_ty = self.typechecker.types.get(this_node).?;
+                        // const ll_this_ty = self.genType(this_ty, .{});
+
+                        var indicies = [_]ir.LLVMValueRef{
+                            ir.LLVMConstInt(ir.LLVMInt64TypeInContext(self.context), 0, 0),
+                            ir.LLVMConstInt(ir.LLVMInt32TypeInContext(self.context), 1, 0),
+                        };
+
+                        const ptr = ir.LLVMBuildInBoundsGEP2(self.builder, ll_basety, ll_expr, @ptrCast(&indicies), @intCast(indicies.len), @as(cstr, ""));
+
+                        if (self.make_ref) {
+                            break :blk ptr;
+                        } else {
+                            const this_node = self.evaluator.instr_to_node.get(instr_id).?;
+                            const out_ty = self.typechecker.types.get(this_node).?;
+
+                            const llty = try self.genType(out_ty, .{});
+
+                            const original_value = ir.LLVMBuildLoad2(self.builder, llty, ptr, @as(cstr, ""));
+                            // const casted_value = ir.LLVMBuildBitCast(self.builder, original_value, ll_this_ty, @as(cstr, ""));
+                            break :blk original_value;
+                        }
+                    },
                     else => @panic("Unimplemetned"),
                 }
+            },
+            .variant => |varn| blk: {
+                const var_ty = self.type_map.get(varn.ty_node).?;
+                const count = ir.LLVMCountStructElementTypes(var_ty);
+
+                const alloca = if (self.alloca_hint != null and self.ty_hint != null and self.ty_hint.?.* == .@"union")
+                    self.alloca_hint.?
+                else blk1: {
+                    const cfunc = self.current_function.?;
+
+                    const current_block = ir.LLVMGetInsertBlock(self.builder);
+                    ir.LLVMPositionBuilderAtEnd(self.builder, cfunc.alloc_block);
+                    const alloc_value = ir.LLVMBuildAlloca(self.builder, var_ty, @as(cstr, "union_tmp"));
+                    ir.LLVMPositionBuilderAtEnd(self.builder, current_block);
+
+                    break :blk1 alloc_value;
+                };
+
+                const back_ty = ir.LLVMStructGetTypeAtIndex(var_ty, 0);
+                const index_value = ir.LLVMBuildIntCast2(
+                    self.builder,
+                    ir.LLVMConstInt(self.ptrSizedInt(), varn.index, 0),
+                    back_ty,
+                    0,
+                    @as(cstr, ""),
+                );
+
+                // const base_ty = try self.genType(slc_ty.base, .{});
+                const str: [*:0]u8 = ir.LLVMPrintValueToString(index_value);
+                std.log.info("Back ty: {s}", .{str});
+
+                var indicies = [_]ir.LLVMValueRef{
+                    ir.LLVMConstInt(ir.LLVMInt32TypeInContext(self.context), 0, 0),
+                    ir.LLVMConstInt(ir.LLVMInt32TypeInContext(self.context), 0, 0),
+                };
+
+                var ll_ptr = ir.LLVMBuildInBoundsGEP2(self.builder, var_ty, alloca, @ptrCast(&indicies), @intCast(indicies.len), @as(cstr, ""));
+                _ = ir.LLVMBuildStore(self.builder, index_value, ll_ptr);
+
+                if (count == 2) {
+                    if (varn.init) |var_init| {
+                        indicies[1] = ir.LLVMConstInt(ir.LLVMInt32TypeInContext(self.context), 1, 0);
+                        ll_ptr = ir.LLVMBuildInBoundsGEP2(self.builder, var_ty, alloca, @ptrCast(&indicies), @intCast(indicies.len), @as(cstr, ""));
+
+                        const union_ty = self.typechecker.declared_types.get(varn.ty_node).?.owned_type.base.@"union";
+
+                        const variant_index = union_ty.variants.multi_type_keyed_impl;
+                        const variants = &self.typechecker.interner.multi_types_keyed.items[variant_index];
+                        // const variant_indicies = self.typechecker.interner.multi_types.items[un.indicies.multi_type_impl.start .. un.indicies.multi_type_impl.start + un.indicies.multi_type_impl.len];
+                        const variant_ty = variants.values()[varn.declared_index];
+
+                        // const variant_index = un.variants.multi_type_keyed_impl;
+                        // const variants = &self.interner.multi_types_keyed.items[variant_index];
+
+                        // const init_node_id = self.evaluator.instr_to_node.get(instr_id).?;
+                        // const init_node = self.analyzer.nodes[init_node_id.index].kind.variant_init;
+
+                        // const variant_ty = self.typechecker.types.get(init_node.variant).?;
+
+                        const old_alloca = self.alloca_hint;
+                        defer self.alloca_hint = old_alloca;
+                        self.alloca_hint = ll_ptr;
+
+                        const val = try self.genWithTypeHint(variant_ty, genInstr, .{ self, var_init }) orelse @panic("Invalid initializer");
+
+                        switch (self.store_op) {
+                            .store => {
+                                _ = ir.LLVMBuildStore(self.builder, val, ll_ptr);
+                            },
+                            .memcpy => |size| {
+                                _ = ir.LLVMBuildMemCpy(
+                                    self.builder,
+                                    ll_ptr,
+                                    0,
+                                    val,
+                                    0,
+                                    ir.LLVMConstInt(self.ptrSizedInt(), size, 0),
+                                );
+                            },
+                            .none => {},
+                        }
+                    } else {
+                        // const uval = ir.LLVMGetUndef(ir.LLVMStructGetTypeAtIndex(var_ty, 1));
+                        // _ = ir.LLVMBuildStore(self.builder, uval, ll_ptr);
+                    }
+                }
+
+                if (self.alloca_hint != null and self.ty_hint != null and self.ty_hint.?.* == .@"union") {
+                    self.store_op = .none;
+                }
+
+                break :blk alloca;
             },
             //
             // else => {
@@ -1001,6 +1164,7 @@ pub const CodeGenerator = struct {
     ) !ir.LLVMTypeRef {
         const llty = switch (ty.*) {
             .int, .uint => |size| ir.LLVMIntTypeInContext(self.context, @intCast(size)),
+            .iptr, .uptr => self.ptrSizedInt(),
             .int_literal => ir.LLVMInt64TypeInContext(self.context),
             .boolean => ir.LLVMInt1TypeInContext(self.context),
             .float => |size| switch (size) {
@@ -1012,7 +1176,7 @@ pub const CodeGenerator = struct {
             },
             .array => |arr_ty| blk: {
                 const ll_base = try self.genType(arr_ty.base, .{});
-                const aty = ir.LLVMArrayType2(ll_base, arr_ty.size);
+                const aty = ir.LLVMArrayType(ll_base, @truncate(arr_ty.size));
                 if (options.param) {
                     if (options.indirect_param) |indirect| {
                         indirect.* = true;
@@ -1103,6 +1267,56 @@ pub const CodeGenerator = struct {
                         self.context,
                         llvm_field_tys.items.ptr,
                         @intCast(llvm_field_tys.items.len),
+                        0,
+                    );
+                }
+            },
+            .@"union" => |un| blk: {
+                const back_ty = if (un.backing_field) |bty|
+                    try self.genType(bty, .{})
+                else
+                    self.ptrSizedInt();
+
+                var largest_ty: ?ir.LLVMTypeRef = null;
+                var largest_size: usize = 0;
+
+                const variant_index_tys = un.variants.*.multi_type_keyed_impl;
+                const variant_tys = &self.typechecker.interner.multi_types_keyed.items[variant_index_tys];
+
+                var varit = variant_tys.iterator();
+                while (varit.next()) |vty| {
+                    if (vty.value_ptr.*.* != .unit) {
+                        const llty = try self.genType(vty.value_ptr.*, .{});
+                        const this_size = ir.LLVMStoreSizeOfType(self.target_data, llty);
+
+                        if (this_size > largest_size) {
+                            largest_ty = llty;
+                            largest_size = this_size;
+                        }
+                    }
+                }
+
+                // const ll_largest = if (largest_ty) |lty| try self.genType(lty, .{}) else undefined;
+
+                var ll_els = [2]ir.LLVMTypeRef{
+                    back_ty,
+                    largest_ty orelse undefined,
+                };
+
+                if (options.named_struct) |ns| {
+                    ir.LLVMStructSetBody(
+                        ns,
+                        &ll_els,
+                        if (largest_ty == null) 1 else 2,
+                        0,
+                    );
+
+                    break :blk ir.LLVMVoidTypeInContext(self.context);
+                } else {
+                    break :blk ir.LLVMStructTypeInContext(
+                        self.context,
+                        &ll_els,
+                        if (largest_ty == null) 1 else 2,
                         0,
                     );
                 }

@@ -137,6 +137,18 @@ pub const Diagnostics = struct {
 
                 break :blk .{ start_tok, end_tok };
             },
+            .variant_init => |vi| blk: {
+                const start_tok = self.beginEnd(vi.variant)[0];
+                const end_tok = self.beginEnd(vi.init)[1];
+
+                break :blk .{ start_tok, end_tok };
+            },
+            .implicit_variant => |_| blk: {
+                const start_tok = tok.implicit_variant.dot_tok;
+                const end_tok = tok.implicit_variant.ident_tok;
+
+                break :blk .{ start_tok, end_tok };
+            },
             .array_init_or_slice_one => |_| blk: {
                 const start_tok = tok.array_init_or_slice_one.open_bracket_tok;
                 const end_tok = tok.array_init_or_slice_one.close_bracket_tok;

@@ -169,6 +169,7 @@ const SegmentSet = std.StringHashMap(void);
 const DeferredNode = struct {
     path: Path,
     node: node.NodeId,
+    param_index: ?u32 = null,
 };
 
 pub const Analyzer = struct {
@@ -234,6 +235,12 @@ pub const Analyzer = struct {
         self.deferred = true;
         for (self.deferred_nodes.items) |deferred_node| {
             self.setScopeFromPath(deferred_node.path);
+            const old_ind = self.param_index;
+            defer self.param_index = old_ind;
+            if (deferred_node.param_index) |ind| {
+                self.param_index = ind;
+            }
+
             try self.analyzeNode(deferred_node.node);
         }
         self.current_scope = &self.root_scope;
@@ -388,6 +395,7 @@ pub const Analyzer = struct {
             },
             .key_value => |expr| {
                 // @TODO: imlement key
+                try self.analyzeNode(expr.key);
                 try self.analyzeNode(expr.value);
             },
             .key_value_ident => |expr| {
@@ -574,6 +582,11 @@ pub const Analyzer = struct {
                     try self.analyzeNode(item);
                 }
             },
+            .variant_init => |varin| {
+                try self.analyzeNode(varin.variant);
+                try self.analyzeNode(varin.init);
+            },
+            .implicit_variant => |_| {},
             .array_init_or_slice_one => |val| {
                 const record_scope = if (self.last_ref) |ref| blk1: {
                     const path = self.node_to_path.get(ref) orelse break :blk1 null;
@@ -697,7 +710,19 @@ pub const Analyzer = struct {
                 }
             },
             .union_variant => |vari| {
-                try self.analyzeNode(vari.ty);
+                if (!self.deferred) {
+                    try self.deferred_nodes.append(.{
+                        .path = try self.pathFromCurrent(),
+                        .node = index,
+                        .param_index = self.param_index,
+                    });
+                    return;
+                }
+
+                if (vari.ty) |ty| {
+                    try self.analyzeNode(ty);
+                }
+
                 {
                     const vnode = self.nodes[vari.name.index];
                     switch (vnode.kind) {

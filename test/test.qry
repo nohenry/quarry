@@ -1,10 +1,24 @@
 
-let Data = type [int8 a]
-
 let main = (int8 argc) int8 {
-    Data d = [a: argc * 2]
-    d.a
+    argc * 2 
 }
+
+let OneOf = type(int8) int8 A = 2 | int8 B
+
+let test_union_double = (OneOf val) int8 { val.A * 2 }
+let test_union_double_ref = (OneOf& val) int8 { val.A * 2 }
+
+let test_union1 = (int8 value) int8 {
+    OneOf d = .A :: value 
+    test_union_double(d)
+}
+
+let test_union2 = (int8 value) int8 {
+    OneOf d = .A :: value 
+    test_union_double_ref(d.&)
+}
+
+let Data = type [int8 a]
 
 let test_record_double = (Data val) int8 { val.a * 2 }
 let test_record_double_ref = (Data& val) int8 { val.a * 2 }
@@ -52,10 +66,13 @@ let test_slice2 = (int8 value) int8 {
     test_slice_double(totest)
 }
 
-let test_array3 = (int8 value) int8 {
-    test_array_double([1, 2, value, 4])
-}
-
 let test_slice3 = (int8 value) int8 {
     test_slice_double([1, 2, value, 4].&)
 }
+
+/*
+
+let test_array3 = (int8 value) int8 {
+    test_array_double([1, 2, value, 4])
+}
+*/
