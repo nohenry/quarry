@@ -31,7 +31,7 @@ int main() {
     ASSERT_EQ(char, root_test_slice1(test_value), test_value_doubled);
     // ASSERT_EQ(char, root_test_array2(test_value), test_value_doubled);
     ASSERT_EQ(char, root_test_slice2(test_value), test_value_doubled);
-    /* ASSERT_EQ(char, root_test_array3(test_value), test_value_doubled); */
+    ASSERT_EQ(char, root_test_array3(test_value), test_value_doubled);
     ASSERT_EQ(char, root_test_slice3(test_value), test_value_doubled);
 
     ASSERT_EQ(char, root_test_record1(test_value), test_value_doubled);

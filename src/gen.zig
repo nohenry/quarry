@@ -146,7 +146,9 @@ pub const CodeGenerator = struct {
         }
 
         for (funcs.items) |func| {
-            _ = try self.genFunc(func[0], func[1], func[2]);
+            if (func[1].instructions != null) {
+                _ = try self.genFunc(func[0], func[1], func[2]);
+            }
         }
 
         var err: [*:0]u8 = undefined;
@@ -185,13 +187,19 @@ pub const CodeGenerator = struct {
     }
 
     pub fn genFuncProto(self: *Self, bind_id: node.NodeId, func: eval.FunctionValue) !ir.LLVMValueRef {
+        // const func_name = if (func.)
         const path = self.analyzer.node_to_path.get(bind_id) orelse @panic("can't get path");
-        const mangled_name = try self.manglePath(path);
+        const fun_scope = self.analyzer.getScopeFromPath(path).?;
+
+        const func_name = if (fun_scope.tags.isSet(node.SymbolTag.external)) blk: {
+            const name = path.segments[path.segments.len - 1];
+            break :blk try self.arena.dupeZ(u8, name);
+        } else try self.manglePath(path);
 
         const fn_ty = self.typechecker.types.get(func.node_id) orelse @panic("cant get fn type");
         const llvm_fn_ty = try self.genType(fn_ty, .{});
 
-        const llvm_func = ir.LLVMAddFunction(self.module, mangled_name.ptr, llvm_fn_ty);
+        const llvm_func = ir.LLVMAddFunction(self.module, func_name.ptr, llvm_fn_ty);
         for (self.param_info.items) |info| {
             if (info.indirect) {
                 const nonnull = ir.LLVMCreateEnumAttribute(self.context, 38, 1); // nonnull
@@ -205,14 +213,15 @@ pub const CodeGenerator = struct {
     }
 
     pub fn genFunc(self: *Self, bind_id: node.NodeId, func: eval.FunctionValue, llvm_func: ir.LLVMValueRef) !ir.LLVMValueRef {
+        if (func.instructions == null) return llvm_func;
+
         try self.pushScope();
         defer self.popScope();
 
+        _ = bind_id;
         const alloc_block = ir.LLVMAppendBasicBlockInContext(self.context, llvm_func, @as(cstr, "alloc"));
         const start_block = ir.LLVMAppendBasicBlockInContext(self.context, llvm_func, @as(cstr, "start"));
         ir.LLVMPositionBuilderAtEnd(self.builder, start_block);
-
-        std.log.info("Instet bufnion {}", .{bind_id});
 
         const old_func = self.current_function;
         std.debug.assert(old_func == null);
@@ -222,7 +231,7 @@ pub const CodeGenerator = struct {
         };
         defer self.current_function = old_func;
 
-        try self.genRange(func.instructions);
+        try self.genRange(func.instructions.?);
 
         ir.LLVMPositionBuilderAtEnd(self.builder, alloc_block);
         _ = ir.LLVMBuildBr(self.builder, start_block);
@@ -433,8 +442,6 @@ pub const CodeGenerator = struct {
                 else
                     undefined;
 
-                self.typechecker.interner.printTy(ty);
-
                 return switch (ty.*) {
                     // @TODO: think about nuw and nsw
                     .int, .iptr => switch (binop.op) {
@@ -633,8 +640,6 @@ pub const CodeGenerator = struct {
                     },
                     .slice => |slc_ty| {
                         const base_ty = try self.genType(slc_ty.base, .{});
-                        const str: [*:0]u8 = ir.LLVMPrintValueToString(ll_expr);
-                        std.log.info("Val: {s}", .{str});
 
                         const value = ir.LLVMBuildZExtOrBitCast(self.builder, ll_sub, ir.LLVMInt64TypeInContext(self.context), @as(cstr, ""));
                         var indicies = [_]ir.LLVMValueRef{
@@ -1037,8 +1042,6 @@ pub const CodeGenerator = struct {
                 );
 
                 // const base_ty = try self.genType(slc_ty.base, .{});
-                const str: [*:0]u8 = ir.LLVMPrintValueToString(index_value);
-                std.log.info("Back ty: {s}", .{str});
 
                 var indicies = [_]ir.LLVMValueRef{
                     ir.LLVMConstInt(ir.LLVMInt32TypeInContext(self.context), 0, 0),

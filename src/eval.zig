@@ -2,6 +2,7 @@ const std = @import("std");
 const node = @import("node.zig");
 const analyze = @import("analyze.zig");
 const typecheck = @import("typecheck.zig");
+const diags = @import("diagnostics.zig");
 
 pub const EvalError = error{} || std.mem.Allocator.Error;
 
@@ -234,7 +235,7 @@ pub const InstructionRange = struct {
 
 pub const FunctionValue = struct {
     node_id: node.NodeId,
-    instructions: InstructionRange,
+    instructions: ?InstructionRange,
 };
 
 pub const TypeValue = struct {
@@ -256,6 +257,7 @@ pub const BoundValue = struct {
 pub const Evaluator = struct {
     gpa: std.mem.Allocator,
     arena: std.mem.Allocator,
+    d: *diags.Diagnostics,
 
     nodes: []const node.Node,
     node_ranges: []const node.NodeId,
@@ -280,6 +282,7 @@ pub const Evaluator = struct {
     const Self = @This();
 
     pub fn init(
+        d: *diags.Diagnostics,
         nodes: []const node.Node,
         node_ranges: []const node.NodeId,
         analyzer: *const analyze.Analyzer,
@@ -288,6 +291,7 @@ pub const Evaluator = struct {
         arena: std.mem.Allocator,
     ) Self {
         return .{
+            .d = d,
             .gpa = gpa,
             .arena = arena,
             .nodes = nodes,
@@ -794,7 +798,6 @@ pub const Evaluator = struct {
                 }
 
                 var ty = self.typechecker.types.get(id) orelse @panic("Unable to get node type");
-                self.typechecker.interner.printTy(ty);
                 if (ty.* == .named) {
                     ty = self.typechecker.declared_types.get(ty.named).?.owned_type.base;
                 }
@@ -888,55 +891,62 @@ pub const Evaluator = struct {
                         const value_node = self.nodes[bind.value.index];
                         switch (value_node.kind) {
                             .func => |func| {
-                                var instructions = try self.evalRange(func.block);
-                                if (instructions.len > 0) {
-                                    const last_instr = self.instruction_ranges.items[instructions.start + instructions.len - 1];
-                                    const last_node = self.node_ranges[func.block.start + func.block.len - 1];
-                                    std.log.info("Node: {}", .{last_node});
-                                    const last_instr_ty = self.typechecker.types.getEntry(last_node) orelse @panic("Unable to get type entry for last instructino!");
-                                    const fn_ret_ty = ty.func.ret_ty;
-                                    //
-                                    // TODO: check if return instruction
-                                    std.debug.assert((last_instr_ty.value_ptr.*.* == .unit and fn_ret_ty == null) or (last_instr_ty.value_ptr.*) == (fn_ret_ty.?));
+                                const instrs = if (func.block) |body| blk1: {
+                                    var instructions = try self.evalRange(body);
+                                    if (instructions.len > 0) {
+                                        const last_instr = self.instruction_ranges.items[instructions.start + instructions.len - 1];
+                                        const last_node = self.node_ranges[body.start + body.len - 1];
+                                        const last_instr_ty = self.typechecker.types.getEntry(last_node) orelse @panic("Unable to get type entry for last instructino!");
+                                        const fn_ret_ty = ty.func.ret_ty;
+                                        //
+                                        // TODO: check if return instruction
+                                        std.debug.assert((last_instr_ty.value_ptr.*.* == .unit and fn_ret_ty == null) or (last_instr_ty.value_ptr.*) == (fn_ret_ty.?));
 
-                                    const instr = try self.createInstruction(.{ .ret = .{ .expr = last_instr } });
-                                    // try self.instruction_ranges.append(instr);
-                                    self.instruction_ranges.items[self.instruction_ranges.items.len - 1] = instr;
-                                } else {
-                                    const instr = try self.createInstruction(.{ .ret = .{ .expr = null } });
-                                    try self.instruction_ranges.append(instr);
-                                    // self.instruction_ranges.items[self.instruction_ranges.items.len - 1] = instr;
-                                    instructions.len += 1;
-                                }
+                                        const instr = try self.createInstruction(.{ .ret = .{ .expr = last_instr } });
+                                        // try self.instruction_ranges.append(instr);
+                                        self.instruction_ranges.items[self.instruction_ranges.items.len - 1] = instr;
+                                    } else {
+                                        const instr = try self.createInstruction(.{ .ret = .{ .expr = null } });
+                                        try self.instruction_ranges.append(instr);
+                                        // self.instruction_ranges.items[self.instruction_ranges.items.len - 1] = instr;
+                                        instructions.len += 1;
+                                    }
+                                    break :blk1 instructions;
+                                } else null;
+
                                 try self.functions.put(id, .{
                                     .node_id = bind.value,
-                                    .instructions = instructions,
+                                    .instructions = instrs,
                                 });
                             },
                             .func_no_params => |func| {
-                                var instructions = try self.evalRange(func.block);
-                                if (instructions.len > 0) {
-                                    const last_instr = self.instruction_ranges.items[instructions.start + instructions.len - 1];
-                                    const last_node = self.node_ranges[func.block.start + func.block.len - 1];
-                                    const last_instr_ty = self.typechecker.types.getEntry(last_node) orelse @panic("Unable to get type entry for last instructino!");
-                                    const fn_ret_ty = ty.func.ret_ty;
-                                    //
-                                    // TODO: check if return instruction
-                                    std.debug.assert((last_instr_ty.value_ptr.*.* == .unit and fn_ret_ty == null) or (last_instr_ty.value_ptr.*) == (fn_ret_ty.?));
+                                const instrs = if (func.block) |body| blk1: {
+                                    var instructions = try self.evalRange(body);
+                                    if (instructions.len > 0) {
+                                        const last_instr = self.instruction_ranges.items[instructions.start + instructions.len - 1];
+                                        const last_node = self.node_ranges[body.start + body.len - 1];
+                                        const last_instr_ty = self.typechecker.types.getEntry(last_node) orelse @panic("Unable to get type entry for last instructino!");
+                                        const fn_ret_ty = ty.func.ret_ty;
+                                        //
+                                        // TODO: check if return instruction
+                                        std.debug.assert((last_instr_ty.value_ptr.*.* == .unit and fn_ret_ty == null) or (last_instr_ty.value_ptr.*) == (fn_ret_ty.?));
 
-                                    const instr = try self.createInstruction(.{ .ret = .{ .expr = last_instr } });
-                                    // try self.instruction_ranges.append(instr);
-                                    self.instruction_ranges.items[self.instruction_ranges.items.len - 1] = instr;
-                                } else {
-                                    const instr = try self.createInstruction(.{ .ret = .{ .expr = null } });
-                                    try self.instruction_ranges.append(instr);
-                                    // self.instruction_ranges.items[self.instruction_ranges.items.len - 1] = instr;
-                                    instructions.len += 1;
-                                }
+                                        const instr = try self.createInstruction(.{ .ret = .{ .expr = last_instr } });
+                                        // try self.instruction_ranges.append(instr);
+                                        self.instruction_ranges.items[self.instruction_ranges.items.len - 1] = instr;
+                                    } else {
+                                        const instr = try self.createInstruction(.{ .ret = .{ .expr = null } });
+                                        try self.instruction_ranges.append(instr);
+                                        // self.instruction_ranges.items[self.instruction_ranges.items.len - 1] = instr;
+                                        instructions.len += 1;
+                                    }
+                                    break :blk1 instructions;
+                                } else null;
+
                                 // instructions.len += 1;
                                 try self.functions.put(id, .{
                                     .node_id = bind.value,
-                                    .instructions = instructions,
+                                    .instructions = instrs,
                                 });
                             },
                             .type_record,
@@ -1151,7 +1161,12 @@ pub const Evaluator = struct {
                             else => @panic("Expected function"),
                         };
 
-                        const block_range = try self.evalRange(block);
+                        if (block == null) {
+                            self.d.addErr(id, "Calling external functions is not allowed at comptime", .{}, .{});
+                            return try self.createConst(.undef);
+                        }
+
+                        const block_range = try self.evalRange(block.?);
                         const ret_instr = self.instructions.items[self.instruction_ranges.items[block_range.start].index];
 
                         if (ret_instr.kind == .constant) {

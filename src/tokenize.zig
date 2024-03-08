@@ -79,6 +79,7 @@ pub const TokenKind = union(enum) {
     bool,
     @"export",
     @"extern",
+    public,
 };
 
 pub const TokenSourceInfo = struct {
@@ -215,10 +216,16 @@ pub const Lexer = struct {
                 i -= 1;
             }
             self.position = src_info.position + src_info.len;
+
+            self.source_info.items.len -= n - 1;
+            self.tokens.items.len -= n - 1;
         } else {
             const i = self.source_info.items.len - n;
             const src_info = self.source_info.items[i];
             self.position = src_info.position + src_info.len;
+
+            self.source_info.items.len -= n;
+            self.tokens.items.len -= n;
         }
     }
 
@@ -451,4 +458,5 @@ pub const keyword_map = std.ComptimeStringMap(TokenKind, [_]KV{
     .{ "float128", .{ .float = 128 } },
     .{ "export", .@"export" },
     .{ "extern", .@"extern" },
+    .{ "public", .public },
 });

@@ -8,6 +8,7 @@ function commaSep(rule, sep) {
 
 const operators = [
     [".", "member"],
+    ["::", "union_init"],
     ["+", "binary_plus"],
     ["-", "binary_plus"],
     ["*", "binary_times"],
@@ -52,6 +53,7 @@ module.exports = grammar({
             "binary_relation",
             "binary_equality",
             "binary_pipe",
+            "union_init",
             "assign",
             $.closure,
             $.const_expr,
@@ -84,6 +86,9 @@ module.exports = grammar({
 
         binding: ($) =>
             seq(
+                optional('public'),
+                optional('export'),
+                optional('extern'),
                 choice("let", $.type),
                 optional("mut"),
                 field("name", $.identifier),
@@ -95,6 +100,7 @@ module.exports = grammar({
             choice(
                 $.primary_expression,
                 $.unary_expression,
+                $.implicit_variant,
                 $.binary_expression,
                 $.identifier,
 
@@ -109,6 +115,7 @@ module.exports = grammar({
             ),
         const_expr: $ => seq('const', $.expression),
         const_block: $ => seq('const', $.if_block),
+        implicit_variant: $ => seq('.', $.identifier),
 
         type: ($) =>
             choice(
@@ -154,8 +161,8 @@ module.exports = grammar({
         record_field: $ => seq(field('type', $.type), field('name', $.identifier), optional(seq('=', $.type))),
         type_union: $ => prec.left(seq($.union_member, repeat(seq("|", $.union_member)))),
         union_member: $ => prec.left(10, seq(
+            $.type,
             $.identifier,
-            prec.left(10, optional(seq(":", $.type))),
             optional(seq("=", $.expression)),
         )),
 
@@ -193,7 +200,7 @@ module.exports = grammar({
             ),
         if_block: $ => seq(
             "{",
-            $.block_stmts,
+            optional($.block_stmts),
             "}"
         ),
 
@@ -214,7 +221,7 @@ module.exports = grammar({
             prec.right(seq(
                 field("parameters", $.paramater_list),
                 optional(field('ret_ty', $.type)),
-                $.if_block,
+                choice($.if_block, '\n'),
             )),
 
         argument_list: ($) => seq("(", commaSep(seq(field('name', optional(seq($.identifier, ':'))), $.expression), ","), ")"),

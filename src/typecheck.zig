@@ -508,6 +508,7 @@ pub const TypeChecker = struct {
     last_ref: ?node.NodeId = null,
     evaluator: *eval.Evaluator = undefined,
     make_sym_ref: bool = false,
+    make_ref: bool = false,
     greedy_symbols: bool = false,
     variant_node: ?node.NodeId = null,
 
@@ -657,9 +658,6 @@ pub const TypeChecker = struct {
                     }
                     try self.declared_types.put(node_id, declared_ty.?);
                 } else {
-                    std.log.debug("almost Put naemd", .{});
-                    self.interner.printTy(ty);
-                    std.debug.print("\n", .{});
                     if (ty.* == .type and (ty.type.* == .record or ty.type.* == .@"union" or ty.type.* == .alias)) {
                         const named_ty = self.interner.ownedTypeTy(node_id, ty.type);
                         try self.declared_types.put(node_id, named_ty);
@@ -789,6 +787,23 @@ pub const TypeChecker = struct {
                     else => {},
                 }
 
+                const old_ref = self.make_ref;
+                defer self.make_ref = old_ref;
+
+                switch (expr.op) {
+                    .assign,
+                    .plus_eq,
+                    .minus_eq,
+                    .times_eq,
+                    .divide_eq,
+                    .bitor_eq,
+                    .bitxor_eq,
+                    => {
+                        self.make_ref = true;
+                    },
+                    else => {},
+                }
+
                 const left_ty = try self.typeCheckNode(expr.left);
 
                 const old_hint = self.ty_hint;
@@ -859,8 +874,8 @@ pub const TypeChecker = struct {
                     break :blk1 self.interner.unitTy();
                 };
 
-                {
-                    const block_nodes = self.nodesRange(func.block);
+                if (func.block) |body| {
+                    const block_nodes = self.nodesRange(body);
                     if (block_nodes.len > 0) {
                         for (block_nodes[0 .. block_nodes.len - 1]) |id| {
                             _ = try self.typeCheckNode(id);
@@ -890,8 +905,8 @@ pub const TypeChecker = struct {
                     break :blk1 self.interner.unitTy();
                 };
 
-                {
-                    const block_nodes = self.nodesRange(func.block);
+                if (func.block) |body| {
+                    const block_nodes = self.nodesRange(body);
                     if (block_nodes.len > 0) {
                         for (block_nodes[0 .. block_nodes.len - 1]) |id| {
                             _ = try self.typeCheckNode(id);
@@ -989,7 +1004,7 @@ pub const TypeChecker = struct {
                 var expr_ty = try self.typeCheckNode(sub.expr);
                 const sub_ty = try self.typeCheckNode(sub.sub);
                 switch (sub_ty.*) {
-                    .int, .uint, .int_literal => {},
+                    .int, .uint, .iptr, .uptr, .int_literal => {},
                     else => {
                         std.log.err("Expected integer type for subscript!", .{});
                     },
@@ -999,6 +1014,7 @@ pub const TypeChecker = struct {
 
                 break :blk switch (expr_ty.*) {
                     .array => |arr| arr.base,
+                    .reference => |ref| ref.base,
                     .slice => |slice| slice.base,
                     else => {
                         std.log.err("Tried to subscript non subsciptable type! Expected array, slice, or indexable reference", .{});

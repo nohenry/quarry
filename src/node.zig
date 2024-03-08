@@ -81,13 +81,17 @@ pub const Node = struct {
                 if (func.ret_ty) |ret| {
                     std.debug.print("  ret_ty: {}-{}\n", .{ ret.file, ret.index });
                 }
-                std.debug.print("  body: {}-{}\n", .{ func.block.start, func.block.start + func.block.len });
+                if (func.block) |blk| {
+                    std.debug.print("  body: {}-{}\n", .{ blk.start, blk.start + blk.len });
+                }
             },
             .func_no_params => |func| {
                 if (func.ret_ty) |ret| {
                     std.debug.print("  ret_ty: {}-{}\n", .{ ret.file, ret.index });
                 }
-                std.debug.print("  body: {}-{}\n", .{ func.block.start, func.block.start + func.block.len });
+                if (func.block) |blk| {
+                    std.debug.print("  body: {}-{}\n", .{ blk.start, blk.start + blk.len });
+                }
             },
             .invoke => |inv| {
                 std.debug.print("  expr: {}-{}\n", .{ inv.expr.file, inv.expr.index });
@@ -257,11 +261,11 @@ pub const NodeKind = union(enum) {
     func: struct {
         params: NodeRange,
         ret_ty: ?NodeId,
-        block: NodeRange,
+        block: ?NodeRange,
     },
     func_no_params: struct {
         ret_ty: ?NodeId,
-        block: NodeRange,
+        block: ?NodeRange,
     },
     invoke: struct {
         expr: NodeId,
@@ -360,6 +364,9 @@ pub const NodeKind = union(enum) {
 pub const NodeTokens = union(enum) {
     single: TokenIndex,
     binding: struct {
+        public_tok: ?TokenIndex,
+        export_tok: ?TokenIndex,
+        extern_tok: ?TokenIndex,
         let_tok: ?TokenIndex,
         mut_tok: ?TokenIndex,
         name_tok: TokenIndex,
@@ -378,8 +385,8 @@ pub const NodeTokens = union(enum) {
         open_paren_tok: TokenIndex,
         close_paren_tok: TokenIndex,
 
-        open_brace_tok: TokenIndex,
-        close_brace_tok: TokenIndex,
+        open_brace_tok: ?TokenIndex,
+        close_brace_tok: ?TokenIndex,
     },
     invoke: struct {
         open_paren_tok: TokenIndex,
@@ -579,8 +586,9 @@ pub const SectionTag = struct {
 };
 
 pub const SymbolTag = struct {
-    pub const Tag = std.bit_set.IntegerBitSet(2);
+    pub const Tag = std.bit_set.IntegerBitSet(3);
 
     pub const exported: usize = 0;
-    pub const public: usize = 1;
+    pub const external: usize = 1;
+    pub const public: usize = 2;
 };

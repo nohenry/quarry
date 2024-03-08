@@ -18,6 +18,7 @@ pub const Scope = struct {
     path: Path,
     parent: ?*Scope,
     kind: ScopeKind,
+    tags: node.SymbolTag.Tag = node.SymbolTag.Tag.initEmpty(),
 
     const Self = @This();
 
@@ -276,6 +277,7 @@ pub const Analyzer = struct {
                                 .references = 0,
                             },
                         });
+                        this_scope.tags = value.tags;
                         try self.path_to_node.put(this_scope.path, index);
                         try self.node_to_path.put(index, this_scope.path);
                     },
@@ -287,6 +289,7 @@ pub const Analyzer = struct {
                                 .references = 0,
                             },
                         });
+                        this_scope.tags = value.tags;
                         try self.path_to_node.put(this_scope.path, index);
                         try self.node_to_path.put(index, this_scope.path);
                     },
@@ -298,6 +301,7 @@ pub const Analyzer = struct {
                                 .parameter = null,
                             },
                         });
+                        this_scope.tags = value.tags;
                         try self.path_to_node.put(this_scope.path, index);
                         try self.node_to_path.put(index, this_scope.path);
                         self.popScope();
@@ -378,9 +382,11 @@ pub const Analyzer = struct {
                     try self.analyzeNode(ret);
                 }
 
-                const block_nodes = self.nodesRange(fval.block);
-                for (block_nodes) |item| {
-                    try self.analyzeNode(item);
+                if (fval.block) |body| {
+                    const block_nodes = self.nodesRange(body);
+                    for (block_nodes) |item| {
+                        try self.analyzeNode(item);
+                    }
                 }
             },
             .func_no_params => |fval| {
@@ -388,9 +394,11 @@ pub const Analyzer = struct {
                     try self.analyzeNode(ret);
                 }
 
-                const block_nodes = self.nodesRange(fval.block);
-                for (block_nodes) |item| {
-                    try self.analyzeNode(item);
+                if (fval.block) |body| {
+                    const block_nodes = self.nodesRange(body);
+                    for (block_nodes) |item| {
+                        try self.analyzeNode(item);
+                    }
                 }
             },
             .key_value => |expr| {

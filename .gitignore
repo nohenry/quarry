@@ -2,3 +2,4 @@ node_modules
 target
 zig-out
 zig-cache
+tree-sitter-quarry/build

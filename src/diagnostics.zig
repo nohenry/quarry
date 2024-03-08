@@ -43,7 +43,8 @@ pub const Diagnostics = struct {
         return switch (node_val.kind) {
             .identifier, .int_literal, .float_literal, .string_literal => .{ tok.single, tok.single },
             .binding => |v| blk: {
-                const start_tok = if (v.ty) |ty| self.beginEnd(ty)[0] else tok.binding.let_tok.?;
+                const start_tok1 = if (v.ty) |ty| self.beginEnd(ty)[0] else tok.binding.let_tok.?;
+                const start_tok = tok.binding.public_tok orelse tok.binding.export_tok orelse tok.binding.extern_tok orelse start_tok1;
                 const end_tok = self.beginEnd(v.value)[1];
 
                 break :blk .{ start_tok, end_tok };
@@ -83,7 +84,7 @@ pub const Diagnostics = struct {
             },
             .func, .func_no_params => blk: {
                 const start_tok = tok.func.open_paren_tok;
-                const end_tok = tok.func.close_brace_tok;
+                const end_tok = tok.func.close_brace_tok orelse tok.func.open_brace_tok orelse tok.func.close_paren_tok;
 
                 break :blk .{ start_tok, end_tok };
             },

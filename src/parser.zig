@@ -8,10 +8,6 @@ pub const ParseError = error{
     UnexpectedGarbage,
 } || std.mem.Allocator.Error;
 
-pub fn dbg(v: anytype) void {
-    std.log.debug("{}", .{v});
-}
-
 pub const Parser = struct {
     arena: std.heap.ArenaAllocator,
     lexer: *tokenize.Lexer,
@@ -104,11 +100,17 @@ pub const Parser = struct {
     pub fn parseItem(self: *Self) !node.NodeId {
         const tok = self.peek() orelse return error.UnexpectedEnd;
 
-        std.log.debug("{}", .{tok});
         return switch (tok.kind) {
             .let => self.parseBinding(),
+            .@"extern" => self.parseBinding(),
+            .@"export" => self.parseBinding(),
+            .public => self.parseBinding(),
             else => blk: {
                 const expr = try self.parseExpr();
+
+                for (self.nodes.items) |nodei| {
+                    nodei.print();
+                }
 
                 self.nodes.items[expr.index].print();
                 if (self.nextIsNoNL(.identifier)) {
@@ -116,7 +118,7 @@ pub const Parser = struct {
                 }
 
                 break :blk if (self.nextIsNoNL(.identifier) or self.nextIsNoNL(.mut))
-                    self.parseBindingWithType(expr, null)
+                    self.parseBindingWithType(expr, null, .{})
                 else
                     expr;
             },
@@ -124,31 +126,55 @@ pub const Parser = struct {
     }
 
     pub fn parseBinding(self: *Self) !node.NodeId {
+        const public_tok = self.consumeIfIs(.public);
+        const extern_tok = self.consumeIfIs(.@"extern");
+        const export_tok = self.consumeIfIs(.@"export");
+
         const let_tok = self.consumeIfIs(.let);
         const ty = if (let_tok == null)
             try self.parseType()
         else
             null;
 
-        return self.parseBindingWithType(ty, let_tok);
+        return self.parseBindingWithType(ty, let_tok, .{
+            .pub_tok = public_tok,
+            .extern_tok = extern_tok,
+            .export_tok = export_tok,
+        });
     }
 
-    pub fn parseBindingWithType(self: *Self, ty_node_id: ?node.NodeId, let_tok: ?tokenize.TokenId) !node.NodeId {
+    pub fn parseBindingWithType(
+        self: *Self,
+        ty_node_id: ?node.NodeId,
+        let_tok: ?tokenize.TokenId,
+        modifiers: struct {
+            pub_tok: ?tokenize.TokenId = null,
+            export_tok: ?tokenize.TokenId = null,
+            extern_tok: ?tokenize.TokenId = null,
+        },
+    ) !node.NodeId {
         const mutable = self.consumeIfIs(.mut);
         const name = try self.expect(.identifier);
         const eq = try self.expect(.assign);
         const expr = try self.parseExpr();
+        var tags = node.SymbolTag.Tag.initEmpty();
+        tags.setValue(node.SymbolTag.public, modifiers.pub_tok != null);
+        tags.setValue(node.SymbolTag.exported, modifiers.export_tok != null);
+        tags.setValue(node.SymbolTag.external, modifiers.extern_tok != null);
 
         return self.createNode(.{
             .binding = .{
                 .name = name[1],
                 .ty = ty_node_id,
                 .mutable = mutable != null,
-                .tags = node.SymbolTag.Tag.initEmpty(),
+                .tags = tags,
                 .value = expr,
             },
         }, .{
             .binding = .{
+                .public_tok = modifiers.pub_tok,
+                .export_tok = modifiers.export_tok,
+                .extern_tok = modifiers.extern_tok,
                 .let_tok = let_tok,
                 .mut_tok = mutable,
                 .name_tok = name[0],
@@ -168,7 +194,6 @@ pub const Parser = struct {
     pub fn parseBinExprWithLeft(self: *Self, left_id: node.NodeId, last_prec: u8) ParseError!node.NodeId {
         var left = left_id;
         // var next_last_prec = last_prec;
-        std.log.warn("Expr {}", .{last_prec});
 
         while (true) {
             left = try self.parsePostExpr(last_prec, left);
@@ -202,7 +227,8 @@ pub const Parser = struct {
         var tok = self.peekNoNL();
         while (tok != null) : (tok = self.peek()) {
             const op = node.Operator.fromTokenKind(tok.?.kind) orelse break;
-            if (postPrec(op) < last_prec) break;
+            const prec = postPrec(op);
+            if (prec == 0 or prec < last_prec) break;
 
             self.lexer.resync();
             tok = self.peekNoNL();
@@ -281,7 +307,8 @@ pub const Parser = struct {
         tok = self.peek();
         while (tok != null) : (tok = self.peek()) {
             const op = node.Operator.fromTokenKind(tok.?.kind) orelse break;
-            if (postPrec(op) < last_prec) break;
+            const prec = postPrec(op);
+            if (prec == 0 or prec < last_prec) break;
 
             switch (tok.?.kind) {
                 .dot_ampersand => {
@@ -305,7 +332,8 @@ pub const Parser = struct {
         tok = self.peek();
         while (tok != null) : (tok = self.peek()) {
             const op = node.Operator.fromTokenKind(tok.?.kind) orelse break;
-            if (postPrec(op) < last_prec) break;
+            const prec = postPrec(op);
+            if (prec == 0 or prec < last_prec) break;
 
             switch (tok.?.kind) {
                 .mut => {
@@ -722,16 +750,16 @@ pub const Parser = struct {
         else
             null;
 
-        const ob_tok = try self.expect(.open_brace);
+        const ob_tok = self.consumeIfIs(.open_brace);
         var cb_tok = self.consumeIfIs(.close_brace);
 
         const block = if (cb_tok != null)
             node.NodeRange{ .start = @truncate(self.node_ranges.items.len), .len = 0 }
-        else blk: {
+        else if (ob_tok != null) blk: {
             const block = try self.parseBlock();
             cb_tok = (try self.expect(.close_brace))[0];
             break :blk block;
-        };
+        } else null;
 
         if (params) |pparams| {
             return self.createNode(.{
@@ -744,8 +772,8 @@ pub const Parser = struct {
                 .func = .{
                     .open_paren_tok = op_tok,
                     .close_paren_tok = cp_tok,
-                    .open_brace_tok = ob_tok[0],
-                    .close_brace_tok = cb_tok.?,
+                    .open_brace_tok = ob_tok,
+                    .close_brace_tok = cb_tok,
                 },
             });
         } else {
@@ -758,8 +786,8 @@ pub const Parser = struct {
                 .func = .{
                     .open_paren_tok = op_tok,
                     .close_paren_tok = cp_tok,
-                    .open_brace_tok = ob_tok[0],
-                    .close_brace_tok = cb_tok.?,
+                    .open_brace_tok = ob_tok,
+                    .close_brace_tok = cb_tok,
                 },
             });
         }
@@ -883,9 +911,8 @@ pub const Parser = struct {
     pub fn parseArgument(self: *Self) !node.NodeId {
         const val = try self.parseKvOrExpr();
         if (self.nodes.items[val.index].kind != .key_value and self.nodes.items[val.index].kind != .key_value_ident) {
-            if (self.node_tokens.items.len == 255) @breakpoint();
-            std.log.err("{}", .{self.node_tokens.items.len});
-            return self.createNode(.{ .argument = val }, self.node_tokens.items[val.index]);
+            const tok = self.node_tokens.items[val.index];
+            return self.createNode(.{ .argument = val }, tok);
         }
         return val;
     }
@@ -1083,7 +1110,6 @@ pub const Parser = struct {
             .index = @truncate(index),
         };
 
-        // @TODO: fix memory bug
         try self.node_tokens.append(tokens);
 
         try self.nodes.append(.{
@@ -1129,7 +1155,7 @@ fn binaryPrec(op: node.Operator) u8 {
 
 fn postPrec(op: node.Operator) u8 {
     return switch (op) {
-        .invoke => 85,
+        .invoke, .subscript => 85,
         .ref => 81,
         .opt => 81,
 

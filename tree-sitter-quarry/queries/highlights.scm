@@ -22,6 +22,7 @@
   name: (identifier) @variable.member
 )
 
+(implicit_variant (identifier) @constant)
 
 ; (variant name: (identifier) @constant)
 ; (field name: (identifier) @field)
@@ -100,6 +101,9 @@
     "mut"
     "type"
     "protocol"
+    "export"
+    "extern"
+    "public"
 ] @keyword
 
 ((identifier) @type
