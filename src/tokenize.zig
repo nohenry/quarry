@@ -102,6 +102,8 @@ pub const SourceInfo = struct {
         var front_pos = pos;
         while (self.source[front_pos] != '\n') : (front_pos += 1) {}
 
+        if (back_pos == front_pos) return .{ back_pos, front_pos };
+
         return .{ back_pos + 1, front_pos };
     }
 

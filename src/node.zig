@@ -193,6 +193,9 @@ pub const Node = struct {
             .type_alias => |ty| {
                 std.debug.print("  ty: {}-{}\n", .{ ty.file, ty.index });
             },
+            .type_wild => |ty| {
+                std.debug.print("  ty: {s}\n", .{ty});
+            },
             .type_ref => |tref| {
                 std.debug.print("  ty: {}\n", .{tref.ty});
                 std.debug.print("  mut: {}\n", .{tref.mut});
@@ -347,6 +350,8 @@ pub const NodeKind = union(enum) {
 
     type_alias: NodeId,
 
+    type_wild: []const u8,
+
     type_ref: struct {
         ty: NodeId,
         mut: bool,
@@ -462,6 +467,10 @@ pub const NodeTokens = union(enum) {
     type_ref: struct {
         ref_tok: TokenIndex,
         mut_tok: ?TokenIndex,
+    },
+    type_wild: struct {
+        dot_tok: TokenIndex,
+        ident_tok: TokenIndex,
     },
 
     // pub fn beginEnd(self: *const NodeTokens) struct { TokenIndex, ?TokenIndex } {

@@ -31,6 +31,13 @@ pub const Scope = struct {
         };
     }
 
+    pub fn setGeneric(self: *Scope, generic: bool) void {
+        switch (self.kind) {
+            .func => |*f| f.generic = generic,
+            else => {},
+        }
+    }
+
     pub fn createChild(self: *Scope, path: Path, name: PathSegment, kind: ScopeKind) !*Self {
         const child = try self.children.getOrPut(name);
 
@@ -91,6 +98,7 @@ pub const ScopeKind = union(enum) {
     anonymous: void,
     func: struct {
         references: u32,
+        generic: bool,
     },
     type: struct {
         references: u32,
@@ -103,6 +111,7 @@ pub const ScopeKind = union(enum) {
         references: u32,
         mutable: bool,
         parameter: ?u32,
+        generic: ?node.NodeId = null,
     },
 };
 
@@ -196,6 +205,7 @@ pub const Analyzer = struct {
     param_index: ?u32 = 0,
     last_ref: ?node.NodeId = null,
     last_deferred: bool = false,
+    last_generic: ?node.NodeId = null,
 
     const Self = @This();
 
@@ -270,11 +280,14 @@ pub const Analyzer = struct {
             .type_int, .type_uint, .type_float, .type_bool => {},
             .binding => |value| {
                 const init_node = self.nodes[value.value.index];
+                defer self.last_generic = null;
+
                 switch (init_node.kind) {
                     .func, .func_no_params => {
                         const this_scope = try self.pushScope(try self.segment(value.name), .{
                             .func = .{
                                 .references = 0,
+                                .generic = self.last_generic != null,
                             },
                         });
                         this_scope.tags = value.tags;
@@ -319,6 +332,7 @@ pub const Analyzer = struct {
                     .type_record,
                     .type_union,
                     => {
+                        self.current_scope.setGeneric(self.last_generic != null);
                         self.popScope();
                     },
                     else => {},
@@ -347,6 +361,8 @@ pub const Analyzer = struct {
             },
             .parameter => |value| {
                 try self.analyzeNode(value.ty);
+                const generic = self.last_generic;
+
                 if (value.spread) {
                     @panic("Unimplemented");
                 }
@@ -356,6 +372,7 @@ pub const Analyzer = struct {
                         .references = 0,
                         .parameter = self.param_index,
                         .mutable = false,
+                        .generic = generic,
                     },
                 });
                 try self.path_to_node.put(this_scope.path, index);
@@ -368,14 +385,20 @@ pub const Analyzer = struct {
                 } else if (self.param_doing_default) {
                     std.log.err("Default arguments should be after all positional arguments!", .{});
                 }
+
+                self.last_generic = generic;
             },
             .func => |fval| {
                 const param_nodes = self.nodesRange(fval.params);
                 self.param_doing_default = false;
+                var generic = false;
+
                 for (param_nodes, 0..) |param, i| {
                     self.param_index = @truncate(i);
                     try self.analyzeNode(param);
+                    generic = generic or self.last_generic != null;
                 }
+
                 self.param_index = null;
 
                 if (fval.ret_ty) |ret| {
@@ -388,6 +411,8 @@ pub const Analyzer = struct {
                         try self.analyzeNode(item);
                     }
                 }
+
+                self.last_generic = if (generic) index else null;
             },
             .func_no_params => |fval| {
                 if (fval.ret_ty) |ret| {
@@ -400,6 +425,8 @@ pub const Analyzer = struct {
                         try self.analyzeNode(item);
                     }
                 }
+
+                self.last_generic = null;
             },
             .key_value => |expr| {
                 // @TODO: imlement key
@@ -763,6 +790,18 @@ pub const Analyzer = struct {
             },
             .type_opt => |opt| {
                 try self.analyzeNode(opt.ty);
+            },
+            .type_wild => |tw| {
+                const this_scope = try self.pushScope(try self.segment(tw), .{
+                    .type = .{
+                        .references = 0,
+                    },
+                });
+                try self.path_to_node.put(this_scope.path, index);
+                try self.node_to_path.put(index, this_scope.path);
+                self.popScope();
+
+                self.last_generic = index;
             },
             // else => std.log.err("Unhandled case: {}", .{node_value}),
         }

@@ -94,7 +94,7 @@ pub const CodeGenerator = struct {
             target_triple,
             ir.LLVMGetHostCPUName(),
             ir.LLVMGetHostCPUFeatures(),
-            ir.LLVMCodeGenLevelNone,
+            ir.LLVMCodeGenLevelAggressive,
             ir.LLVMRelocPIC,
             ir.LLVMCodeModelDefault,
         );
@@ -188,7 +188,14 @@ pub const CodeGenerator = struct {
 
     pub fn genFuncProto(self: *Self, bind_id: node.NodeId, func: eval.FunctionValue) !ir.LLVMValueRef {
         // const func_name = if (func.)
-        const path = self.analyzer.node_to_path.get(bind_id) orelse @panic("can't get path");
+        var fid = bind_id;
+        if (self.analyzer.node_ref.get(fid)) |new_id| {
+            std.log.info("Gen222 {}", .{new_id});
+            fid = new_id;
+        }
+        std.log.info("Gen {}", .{bind_id});
+
+        const path = self.analyzer.node_to_path.get(fid) orelse @panic("can't get path");
         const fun_scope = self.analyzer.getScopeFromPath(path).?;
 
         const func_name = if (fun_scope.tags.isSet(node.SymbolTag.external)) blk: {
@@ -196,7 +203,7 @@ pub const CodeGenerator = struct {
             break :blk try self.arena.dupeZ(u8, name);
         } else try self.manglePath(path);
 
-        const fn_ty = self.typechecker.types.get(func.node_id) orelse @panic("cant get fn type");
+        const fn_ty = self.typechecker.types.get(func.node_id) orelse self.typechecker.generic_types.get(bind_id).?.get(func.node_id).?;
         const llvm_fn_ty = try self.genType(fn_ty, .{});
 
         const llvm_func = ir.LLVMAddFunction(self.module, func_name.ptr, llvm_fn_ty);
@@ -251,6 +258,7 @@ pub const CodeGenerator = struct {
 
     pub fn genInstr(self: *Self, instr_id: eval.InstructionId) !?ir.LLVMValueRef {
         const instr = self.evaluator.instructions.items[instr_id.index];
+        std.log.debug("Gen Instr {}", .{instr_id});
 
         const result = switch (instr.kind) {
             .constant => blk: {
@@ -282,7 +290,8 @@ pub const CodeGenerator = struct {
                 const bound_path = self.analyzer.node_to_path.get(id) orelse @panic("Unable to get path of ident");
                 const scope = self.analyzer.getScopeFromPath(bound_path) orelse @panic("Unable to get scpe from path");
                 const param_index = scope.kind.local.parameter;
-                const ty = self.typechecker.declared_types.get(id) orelse @panic("Unable to get declared type");
+                // const ty = self.typechecker.declared_types.get(id) orelse @panic("Unable to get declared type");
+                const ty = self.getType(instr_id) orelse @panic("Unable to get declared type");
 
                 if (param_index) |ind| {
                     // const pinfo = blk: {
@@ -344,8 +353,9 @@ pub const CodeGenerator = struct {
                 const func = if (self.current_function) |*func| func else @panic("Expected function!!");
                 func.control_flow_terminated = true;
                 if (exp.expr) |e| {
-                    const node_id = self.evaluator.instr_to_node.get(e) orelse @panic("Unable to get node id from isntruction return value");
-                    const ret_ty = self.typechecker.types.get(node_id).?;
+                    // const node_id = self.evaluator.instr_to_node.get(e) orelse @panic("Unable to get node id from isntruction return value");
+                    // const ret_ty = self.typechecker.types.get(node_id).?;
+                    const ret_ty = self.getType(e).?;
 
                     const value = try self.genWithTypeHint(ret_ty, genInstr, .{ self, e });
 
@@ -356,7 +366,7 @@ pub const CodeGenerator = struct {
                 return null;
             },
             .binding => |info| blk: {
-                var ty = self.typechecker.declared_types.get(info.node) orelse @panic("No declared type");
+                var ty = self.getDeclaredType(instr_id) orelse @panic("No declared type");
                 const llty = try self.genType(ty, .{});
 
                 while (ty.* == .named) {
@@ -409,19 +419,15 @@ pub const CodeGenerator = struct {
             .assign => |exp| {
                 const lvalue = try self.genWithRef(true, genInstr, .{ self, exp.left }) orelse @panic("expected lvalue");
 
-                const lhs_node_id = self.evaluator.instr_to_node.get(exp.left) orelse @panic("Unable to get lhs node id");
-                const ty = self.typechecker.types.getEntry(lhs_node_id) orelse @panic("Unable to get type entry");
-                const rvalue = try self.genWithTypeHint(ty.value_ptr.*, genInstr, .{ self, exp.right }) orelse @panic("expected rvalue");
+                const ty = self.getType(exp.left) orelse @panic("Unable to get type entry");
+                const rvalue = try self.genWithTypeHint(ty, genInstr, .{ self, exp.right }) orelse @panic("expected rvalue");
 
                 const svalue = ir.LLVMBuildStore(self.builder, rvalue, lvalue);
                 return svalue;
             },
             .binary_expr => |binop| {
-                const lhs_node_id = self.evaluator.instr_to_node.get(binop.left) orelse @panic("Unable to get lhs node id");
-                const rhs_node_id = self.evaluator.instr_to_node.get(binop.right) orelse @panic("Unable to get rhs node id");
-
-                var ty = self.typechecker.types.get(lhs_node_id) orelse
-                    self.typechecker.types.get(rhs_node_id) orelse
+                var ty = self.getType(binop.left) orelse
+                    self.getType(binop.right) orelse
                     self.ty_hint orelse
                     @panic("Unable to retrieve type information for node");
 
@@ -535,8 +541,7 @@ pub const CodeGenerator = struct {
             .unary_expr => |unary| {
                 const expr = try self.genInstr(unary.expr) orelse @panic("Unable to get expr");
 
-                const expr_node_id = self.evaluator.instr_to_node.get(unary.expr) orelse @panic("Unable to get expr node id");
-                const ty = self.typechecker.types.get(expr_node_id) orelse
+                const ty = self.getType(unary.expr) orelse
                     self.ty_hint orelse
                     @panic("Unable to retrieve type information for node");
 
@@ -573,33 +578,34 @@ pub const CodeGenerator = struct {
                 const param_nodes = self.analyzer.nodesRange(func_node.params);
                 std.debug.assert(param_nodes.len == arg_instrs.len);
 
-                for (arg_instrs, 0..) |arg_id, i| {
+                for (arg_instrs) |arg_id| {
                     const old_alloca_hint = self.alloca_hint;
                     defer self.alloca_hint = old_alloca_hint;
                     self.alloca_hint = null;
 
-                    var parameter_ty = self.typechecker.declared_types.get(param_nodes[i]) orelse @panic("Unable to get param ty");
+                    var arg_ty = self.getType(arg_id).?;
 
                     const old_makeref = self.make_ref;
                     defer self.make_ref = old_makeref;
                     // Arguments like aggregate types should be referenced.
-                    self.make_ref = self.paramWillBeIndirect(parameter_ty);
+                    self.make_ref = self.paramWillBeIndirect(arg_ty);
 
-                    while (parameter_ty.* == .named) {
-                        parameter_ty = self.typechecker.declared_types.get(parameter_ty.named).?.owned_type.base;
+                    while (arg_ty.* == .named) {
+                        arg_ty = self.typechecker.declared_types.get(arg_ty.named).?.owned_type.base;
                     }
                     // Why does not looking at store op work here?
-                    const value = try self.genWithTypeHint(parameter_ty, genInstr, .{ self, arg_id }) orelse @panic("Unable to get argument value");
+                    const value = try self.genWithTypeHint(arg_ty, genInstr, .{ self, arg_id }) orelse @panic("Unable to get argument value");
 
                     try llvm_args.append(value);
                 }
 
                 const callee_id = self.evaluator.instr_to_node.get(call.expr) orelse @panic("Unable to get callee id");
-                const callee_type = self.typechecker.types.get(callee_id) orelse @panic("Unable to get callee ty");
                 const callee_binding = self.analyzer.node_ref.get(callee_id) orelse @panic("Unable to get original fn id");
 
+                const callee_type = self.getType(call.expr) orelse @panic("Unable to get callee ty");
+
                 const llvm_fn_ty = try self.genType(callee_type, .{});
-                const global_val = self.globals.get(callee_binding) orelse @panic("function not in global table");
+                const global_val = self.globals.get(callee_binding) orelse self.globals.get(callee_id) orelse @panic("function not in global table");
 
                 const result = ir.LLVMBuildCall2(
                     self.builder,
@@ -621,8 +627,7 @@ pub const CodeGenerator = struct {
                     break :blk1 try self.genWithTypeHint(self.typechecker.interner.uintTy(64), genInstr, .{ self, sub.sub }) orelse @panic("Unable to get subscript sub!");
                 };
 
-                const node_id = self.evaluator.instr_to_node.get(sub.expr) orelse @panic("Unable to get node id of subscript expression");
-                const node_ty = self.typechecker.types.get(node_id) orelse @panic("Unable to get node type of subscript expression");
+                const node_ty = self.getType(sub.expr) orelse @panic("Unable to get node type of subscript expression");
                 // while (node_ty.* == .reference) {
                 //     const llty_tmp = try self.genType(node_ty, .{});
                 //     ll_expr = ir.LLVMBuildLoad2(self.builder, llty_tmp, ll_expr, @as(cstr, ""));
@@ -749,8 +754,7 @@ pub const CodeGenerator = struct {
                 return null;
             },
             .array_init => |arr| blk: {
-                const node_id = self.evaluator.instr_to_node.get(instr_id) orelse @panic("Unable to get node id of invoke");
-                const node_ty = self.typechecker.types.get(node_id) orelse @panic("Unable to get node type");
+                const node_ty = self.getType(instr_id) orelse @panic("Unable to get node type");
                 const base_ty = node_ty.array.base;
 
                 var ll_vals = std.ArrayList(ir.LLVMValueRef).init(self.arena);
@@ -826,11 +830,8 @@ pub const CodeGenerator = struct {
                 }
             },
             .reference => |ref| blk: {
-                const this_node = self.evaluator.instr_to_node.get(instr_id) orelse @panic("Unable to get instrid for reference");
-                const this_ty = self.typechecker.types.get(this_node) orelse @panic("Unable to get type for reference");
-
-                const base_node = self.evaluator.instr_to_node.get(ref.expr) orelse @panic("Unable to get instrid for reference base");
-                const base_ty = self.typechecker.types.get(base_node) orelse @panic("Unable to get type for reference base");
+                const this_ty = self.getType(instr_id) orelse @panic("Unable to get type for reference");
+                const base_ty = self.getType(ref.expr) orelse @panic("Unable to get type for reference base");
 
                 const value = try self.genWithRef(true, genInstr, .{ self, ref.expr }) orelse @panic("invalid ref value");
 
@@ -879,8 +880,8 @@ pub const CodeGenerator = struct {
                 if (self.make_ref) {
                     break :blk value;
                 }
-                const node_id = self.evaluator.instr_to_node.get(instr_id) orelse @panic("Unable to get node id of invoke");
-                const node_ty = self.typechecker.types.get(node_id) orelse @panic("Unable to get node type");
+
+                const node_ty = self.getType(instr_id) orelse @panic("Unable to get node type");
                 const llvm_ty = try self.genType(node_ty, .{});
 
                 break :blk ir.LLVMBuildLoad2(self.builder, llvm_ty, value, @as(cstr, ""));
@@ -888,7 +889,7 @@ pub const CodeGenerator = struct {
             .record_init => |ri| blk: {
                 const node_id = self.evaluator.instr_to_node.get(instr_id) orelse @panic("Unable to get node id of invoke");
                 const ref_node = self.analyzer.node_ref.get(node_id) orelse @panic("Unable tog et node ref");
-                const node_ty = self.typechecker.types.get(node_id) orelse @panic("Unable to get node type");
+                const node_ty = self.getType(instr_id) orelse @panic("Unable to get node type");
 
                 const record_ty = self.typechecker.declared_types.get(node_ty.named).?.owned_type.base.record;
                 const fields_index = record_ty.fields.multi_type_keyed_impl;
@@ -968,8 +969,7 @@ pub const CodeGenerator = struct {
             .member_access => |acc| blk: {
                 var ll_expr = try self.genWithRef(true, genInstr, .{ self, acc.expr }) orelse @panic("Unable to get base for fiels access!");
 
-                const expr_node = self.evaluator.instr_to_node.get(acc.expr) orelse @panic("Unable to get lhs node");
-                var expr_ty = self.typechecker.types.get(expr_node).?;
+                var expr_ty = self.getType(acc.expr).?;
 
                 while (expr_ty.* == .reference) {
                     const llty_tmp = try self.genType(expr_ty, .{});
@@ -1001,9 +1001,7 @@ pub const CodeGenerator = struct {
                         if (self.make_ref) {
                             break :blk ptr;
                         } else {
-                            const this_node = self.evaluator.instr_to_node.get(instr_id).?;
-                            const out_ty = self.typechecker.types.get(this_node).?;
-
+                            const out_ty = self.getType(instr_id).?;
                             const llty = try self.genType(out_ty, .{});
 
                             break :blk ir.LLVMBuildLoad2(self.builder, llty, ptr, @as(cstr, ""));
@@ -1025,9 +1023,7 @@ pub const CodeGenerator = struct {
                         if (self.make_ref) {
                             break :blk ptr;
                         } else {
-                            const this_node = self.evaluator.instr_to_node.get(instr_id).?;
-                            const out_ty = self.typechecker.types.get(this_node).?;
-
+                            const out_ty = self.getType(instr_id).?;
                             const llty = try self.genType(out_ty, .{});
 
                             const original_value = ir.LLVMBuildLoad2(self.builder, llty, ptr, @as(cstr, ""));
@@ -1128,6 +1124,7 @@ pub const CodeGenerator = struct {
 
                 break :blk alloca;
             },
+            .direct_ref => null,
             //
             // else => {
             //     std.log.err("Unhandled instruction in codegen! {}", .{instr});
@@ -1382,6 +1379,14 @@ pub const CodeGenerator = struct {
         if (self.globals.getEntry(id)) |ent| return ent.value_ptr;
 
         return null;
+    }
+
+    fn getType(self: *Self, instr_id: eval.InstructionId) ?typecheck.Type {
+        return self.evaluator.types_map.get(instr_id);
+    }
+
+    fn getDeclaredType(self: *Self, instr_id: eval.InstructionId) ?typecheck.Type {
+        return self.evaluator.declared_types_map.get(instr_id);
     }
 
     inline fn instrRange(self: *const Self, range: eval.InstructionRange) []const eval.InstructionId {

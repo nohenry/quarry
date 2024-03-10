@@ -19,14 +19,21 @@ pub const Diagnostics = struct {
     arena: std.mem.Allocator,
     diagnostics: std.ArrayList(Diagnostic),
     nodes: []const node.Node,
+    node_ranges: []const node.NodeId,
     node_tokens: []const node.NodeTokens,
 
     const Self = @This();
 
-    pub fn init(nodes: []const node.Node, node_tokens: []const node.NodeTokens, arena: std.mem.Allocator) Self {
+    pub fn init(
+        nodes: []const node.Node,
+        node_ranges: []const node.NodeId,
+        node_tokens: []const node.NodeTokens,
+        arena: std.mem.Allocator,
+    ) Self {
         return .{
             .arena = arena,
             .nodes = nodes,
+            .node_ranges = node_ranges,
             .node_tokens = node_tokens,
             .diagnostics = std.ArrayList(Diagnostic).init(arena),
         };
@@ -41,7 +48,7 @@ pub const Diagnostics = struct {
         const tok = &self.node_tokens[node_id.index];
 
         return switch (node_val.kind) {
-            .identifier, .int_literal, .float_literal, .string_literal => .{ tok.single, tok.single },
+            .identifier, .int_literal, .float_literal, .string_literal, .bool_literal => .{ tok.single, tok.single },
             .binding => |v| blk: {
                 const start_tok1 = if (v.ty) |ty| self.beginEnd(ty)[0] else tok.binding.let_tok.?;
                 const start_tok = tok.binding.public_tok orelse tok.binding.export_tok orelse tok.binding.extern_tok orelse start_tok1;
@@ -162,6 +169,42 @@ pub const Diagnostics = struct {
 
                 break :blk .{ start_tok, end_tok };
             },
+            .type_record => |_| blk: {
+                break :blk .{ tok.type_record.ty_tok, tok.type_record.close_bracket_tok };
+            },
+            .record_field => |fi| blk: {
+                const start_tok = self.beginEnd(fi.ty)[0];
+                const end_tok = if (fi.default) |def|
+                    self.beginEnd(def)[1]
+                else
+                    tok.record_field.name_tok;
+
+                break :blk .{ start_tok, end_tok };
+            },
+            .type_union => |u| blk: {
+                const start_tok = tok.type_union.ty_tok;
+                const end_tok = if (u.variants.len > 0)
+                    self.beginEnd(self.node_ranges[u.variants.start + u.variants.len - 1])[1]
+                else
+                    tok.type_union.close_paren_tok orelse tok.type_union.ty_tok;
+
+                break :blk .{ start_tok, end_tok };
+            },
+            .union_variant => |fi| blk: {
+                const start_tok = if (tok.union_variant.pipe_tok) |pt|
+                    pt
+                else if (fi.ty) |ty|
+                    self.beginEnd(ty)[0]
+                else
+                    self.beginEnd(fi.name)[0];
+
+                const end_tok = if (fi.index) |ind|
+                    self.beginEnd(ind)[1]
+                else
+                    self.beginEnd(fi.name)[0];
+
+                break :blk .{ start_tok, end_tok };
+            },
             .type_alias => |v| blk: {
                 const start_tok = tok.single;
                 const end_tok = self.beginEnd(v)[1];
@@ -183,8 +226,12 @@ pub const Diagnostics = struct {
             .type_int, .type_uint, .type_float, .type_bool => blk: {
                 break :blk .{ tok.single, tok.single };
             },
+            .type_wild => |_| blk: {
+                const start_tok = tok.implicit_variant.dot_tok;
+                const end_tok = tok.implicit_variant.ident_tok;
 
-            else => @panic("Unimplemtned"),
+                break :blk .{ start_tok, end_tok };
+            },
         };
         // return switch (tok.*) {
         //     .single => |s| .{ s, null },

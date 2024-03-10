@@ -54,7 +54,7 @@ pub fn main() !void {
     var prsr = parser.Parser.init(alloc.allocator(), &lexer);
     const ids = try prsr.parse();
 
-    var diag = diags.Diagnostics.init(prsr.nodes.items, prsr.node_tokens.items, diag_arena.allocator());
+    var diag = diags.Diagnostics.init(prsr.nodes.items, prsr.node_ranges.items, prsr.node_tokens.items, diag_arena.allocator());
 
     std.debug.print("File items: \n", .{});
     for (ids) |nodeId| {
@@ -114,16 +114,16 @@ pub fn main() !void {
     //     instr.print();
     // }
 
-    // std.debug.print("\nInstruction Ranges: \n", .{});
-    // for (evaluator.instruction_ranges.items) |nodeId| {
-    //     const instr = evaluator.instructions.items[@as(usize, nodeId.index)];
-    //     instr.print();
-    // }
+    std.debug.print("\nInstruction Ranges: \n", .{});
+    for (evaluator.instruction_ranges.items) |nodeId| {
+        const instr = evaluator.instructions.items[@as(usize, nodeId.index)];
+        instr.print();
+    }
 
-    // std.debug.print("\nAll instructions: \n", .{});
-    // for (evaluator.instructions.items) |instr| {
-    //     instr.print();
-    // }
+    std.debug.print("\nAll instructions: \n", .{});
+    for (evaluator.instructions.items) |instr| {
+        instr.print();
+    }
 
     if (diag.allGood()) {
         var code_gen = gen.CodeGenerator.init(&anal, &evaluator, &tycheck, &diag, arena.allocator(), alloc.allocator());

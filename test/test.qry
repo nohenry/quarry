@@ -1,14 +1,23 @@
 
-let main = (int8 argc) int8 {
+let main = (uint8 argc) uint8 {
     let value = malloc(200000)
-    uint mut i = 0
+    value.* = argc * 2
+
+    uint mut i = 1
     loop i < 20000 {
         value[i] = 0xdd
         i += 1
     }
-    argc * 2
+
+    let res = foo(value)
+    res
 }
 
+let foo = (*T& a) T {
+    a.*
+}
+
+/*
 let OneOf = type(int8) int8 A  | int8 B
 
 let test_union_double = (OneOf val) int8 { val.A * 2 }
@@ -79,5 +88,6 @@ let test_slice3 = (int8 value) int8 {
 let test_array3 = (int8 value) int8 {
     test_array_double([1, 2, value, 4])
 }
+*/
 
 extern let malloc = (int size) uint8&

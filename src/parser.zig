@@ -132,7 +132,7 @@ pub const Parser = struct {
 
         const let_tok = self.consumeIfIs(.let);
         const ty = if (let_tok == null)
-            try self.parseType()
+            try self.parseExpr()
         else
             null;
 
@@ -850,24 +850,36 @@ pub const Parser = struct {
     }
 
     pub fn parseLiteral(self: *Self) !node.NodeId {
-        if (self.consumeIfIs(.dot)) |dot_tok| {
-            const ident = try self.expect(.identifier);
-            return try self.createNode(.{
-                .implicit_variant = .{
-                    .ident = ident[1],
-                },
-            }, .{
-                .implicit_variant = .{
-                    .dot_tok = dot_tok,
-                    .ident_tok = ident[0],
-                },
-            });
-        }
-
         const tok = self.peek() orelse return error.UnexpectedEnd;
         std.log.debug("Literal: {}", .{tok});
 
         return switch (tok.kind) {
+            .dot => blk: {
+                const dot_tok = self.next();
+                const ident = try self.expect(.identifier);
+                break :blk try self.createNode(.{
+                    .implicit_variant = .{
+                        .ident = ident[1],
+                    },
+                }, .{
+                    .implicit_variant = .{
+                        .dot_tok = dot_tok.?.id,
+                        .ident_tok = ident[0],
+                    },
+                });
+            },
+            .star => blk: {
+                const star_tok = self.next();
+                const ident = try self.expect(.identifier);
+                break :blk try self.createNode(.{
+                    .type_wild = ident[1],
+                }, .{
+                    .type_wild = .{
+                        .dot_tok = star_tok.?.id,
+                        .ident_tok = ident[0],
+                    },
+                });
+            },
             .int_literal => |value| self.createNodeAndNext(.{ .int_literal = value }),
             .float_literal => |value| self.createNodeAndNext(.{ .float_literal = value }),
             .bool_literal => |value| self.createNodeAndNext(.{ .bool_literal = value }),
@@ -889,23 +901,6 @@ pub const Parser = struct {
             .identifier => |value| return self.createNodeAndNext(.{ .identifier = value }),
             else => return error.UnexpectedToken,
         }
-    }
-
-    pub fn parseType(self: *Self) !node.NodeId {
-        const tok = self.peekNoNL() orelse return error.UnexpectedEnd;
-        return switch (tok.kind) {
-            .int => |size| self.createNodeAndNext(.{
-                .type_int = size,
-            }),
-            .uint => |size| self.createNodeAndNext(.{
-                .type_uint = size,
-            }),
-            .float => |size| self.createNodeAndNext(.{
-                .type_float = size,
-            }),
-            .bool => self.createNodeAndNext(.type_bool),
-            else => error.UnexpectedToken,
-        };
     }
 
     pub fn parseArgument(self: *Self) !node.NodeId {

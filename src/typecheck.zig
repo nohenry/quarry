@@ -145,40 +145,6 @@ pub const TypeInterner = struct {
 
     pub fn setup(self: *Self) !void {
         const types = TypeMap.initContext(self.allocator, .{ .interner = self });
-        // inline for (&.{ 8, 16, 32, 64, 128 }) |size| {
-        //     const ity = try self.allocator.create(BaseType);
-        //     ity.* = .{ .int = size };
-        //     try types.put(.{ .int = size }, ity);
-
-        //     const uty = try self.allocator.create(BaseType);
-        //     uty.* = .{ .uint = size };
-        //     try types.put(.{ .uint = size }, uty);
-
-        //     const fty = try self.allocator.create(BaseType);
-        //     fty.* = .{ .float = size };
-        //     try types.put(.{ .float = size }, fty);
-        // }
-
-        // const unitty = try self.allocator.create(BaseType);
-        // unitty.* = .unit;
-        // try types.put(.unit, unitty);
-
-        // const uty = try self.allocator.create(BaseType);
-        // uty.* = .uptr;
-        // try types.put(.uptr, uty);
-
-        // const ity = try self.allocator.create(BaseType);
-        // ity.* = .iptr;
-        // try types.put(.iptr, ity);
-
-        // const bty = try self.allocator.create(BaseType);
-        // bty.* = .boolean;
-        // try types.put(.boolean, bty);
-
-        // const sty = try self.allocator.create(BaseType);
-        // sty.* = .str;
-        // try types.put(.str, bty);
-
         self.types = types;
     }
 
@@ -249,10 +215,6 @@ pub const TypeInterner = struct {
     }
 
     pub fn unionTy(self: *Self, backing_field: ?Type, variants: std.StringArrayHashMap(Type), indicies: []const Type) Type {
-        // var index_map = std.ArrayList(Type).init(self.arena);
-        // for (indicies) |ind| {
-        //     index_map.append(self.createOrGetTy(.{ .simple_int_value = ind })) catch @panic("memory alloc error");
-        // }
         const variant_tys = self.multiTyKeyed(variants);
         const index_tys = self.multiTy(indicies);
         return self.createOrGetTy(.{
@@ -403,7 +365,7 @@ pub const TypeInterner = struct {
                 try self.printTyWriter(uni.variants, writer);
             },
             .alias => |base| {
-                try writer.print("type", .{});
+                try writer.print("alias", .{});
                 // if (rec.backing_field) |field| {
                 //     try writer.print("(", .{});
                 //     try self.printTyWriter(field, writer);
@@ -493,6 +455,7 @@ pub const TypeInterner = struct {
 };
 
 pub const TypeChecker = struct {
+    gpa: std.mem.Allocator,
     arena: std.mem.Allocator,
     interner: *TypeInterner,
     d: *diags.Diagnostics,
@@ -504,6 +467,9 @@ pub const TypeChecker = struct {
     types: std.AutoHashMap(node.NodeId, Type),
     declared_types: std.AutoHashMap(node.NodeId, Type),
 
+    generic_types: std.AutoHashMap(node.NodeId, std.AutoHashMap(node.NodeId, Type)),
+    generic_declared_types: std.AutoHashMap(node.NodeId, std.AutoHashMap(node.NodeId, Type)),
+
     ty_hint: ?Type = null,
     last_ref: ?node.NodeId = null,
     evaluator: *eval.Evaluator = undefined,
@@ -511,6 +477,8 @@ pub const TypeChecker = struct {
     make_ref: bool = false,
     greedy_symbols: bool = false,
     variant_node: ?node.NodeId = null,
+    binding_node: ?node.NodeId = null,
+    generic_ctx: ?node.NodeId = null,
 
     const Self = @This();
 
@@ -527,6 +495,7 @@ pub const TypeChecker = struct {
         try interner.setup();
 
         return .{
+            .gpa = allocator,
             .arena = arena,
             .interner = interner,
             .d = diag,
@@ -535,6 +504,8 @@ pub const TypeChecker = struct {
             .analyzer = analyzer,
             .types = std.AutoHashMap(node.NodeId, Type).init(allocator),
             .declared_types = std.AutoHashMap(node.NodeId, Type).init(allocator),
+            .generic_types = std.AutoHashMap(node.NodeId, std.AutoHashMap(node.NodeId, Type)).init(allocator),
+            .generic_declared_types = std.AutoHashMap(node.NodeId, std.AutoHashMap(node.NodeId, Type)).init(allocator),
         };
     }
 
@@ -567,6 +538,34 @@ pub const TypeChecker = struct {
             }
         }
 
+        {
+            std.debug.print("Generic Declared Types: \n", .{});
+            var git = self.generic_declared_types.iterator();
+            while (git.next()) |gmap| {
+                std.debug.print("Instance Node: {}\n", .{gmap.key_ptr.*});
+                var it = gmap.value_ptr.iterator();
+                while (it.next()) |ty| {
+                    std.debug.print("  ", .{});
+                    self.printTypeMap(ty.key_ptr.*, ty.value_ptr.*);
+                    std.debug.print("\n", .{});
+                }
+            }
+        }
+
+        {
+            std.debug.print("Generic Node Types: \n", .{});
+            var git = self.generic_types.iterator();
+            while (git.next()) |gmap| {
+                std.debug.print("Instance Node: {}\n", .{gmap.key_ptr.*});
+                var it = gmap.value_ptr.iterator();
+                while (it.next()) |ty| {
+                    std.debug.print("  ", .{});
+                    self.printTypeMap(ty.key_ptr.*, ty.value_ptr.*);
+                    std.debug.print("\n", .{});
+                }
+            }
+        }
+
         return .{
             .types = self.types,
             .declared_types = self.declared_types,
@@ -580,7 +579,7 @@ pub const TypeChecker = struct {
         self.interner.printTy(ty);
     }
 
-    fn printIntCol(i: u32) void {
+    pub fn printIntCol(i: u32) void {
         const alignment: u32 = 4;
         const count = countDigits(i);
         for (0..alignment - count) |_| {
@@ -622,6 +621,10 @@ pub const TypeChecker = struct {
         const node_value = self.nodes[node_id.index];
         const ty = switch (node_value.kind) {
             .binding => |value| {
+                const old_bind = self.binding_node;
+                defer self.binding_node = old_bind;
+                self.binding_node = node_id;
+
                 var declared_ty = if (value.ty) |ty|
                     try self.typeCheckNode(ty)
                 else
@@ -656,13 +659,13 @@ pub const TypeChecker = struct {
 
                         self.d.addErr(node_id, "Type of initial value does not match variable type! \nDeclared type:\n  {s}\nInitial value type:\n  {s}\n", .{ declared_ty_str, ty_str }, .{});
                     }
-                    try self.declared_types.put(node_id, declared_ty.?);
+                    try self.putDeclaredType(node_id, declared_ty.?);
                 } else {
                     if (ty.* == .type and (ty.type.* == .record or ty.type.* == .@"union" or ty.type.* == .alias)) {
                         const named_ty = self.interner.ownedTypeTy(node_id, ty.type);
-                        try self.declared_types.put(node_id, named_ty);
+                        try self.putDeclaredType(node_id, named_ty);
                     } else {
-                        try self.declared_types.put(node_id, ty);
+                        try self.putDeclaredType(node_id, ty);
                     }
                 }
 
@@ -675,10 +678,11 @@ pub const TypeChecker = struct {
                     break :blk self.interner.unitTy();
                 };
                 self.last_ref = ref_node;
-                if (self.types.get(ref_node)) |ty| break :blk ty;
-                if (self.declared_types.get(ref_node)) |ty| {
+                if (self.getType(ref_node)) |ty| break :blk ty;
+                if (self.getDeclaredType(ref_node)) |ty| {
                     break :blk if (!self.make_sym_ref) switch (ty.*) {
                         .owned_type => |base| self.interner.namedTy(base.binding),
+                        .alias => |_| ty,
                         else => ty,
                     } else ty;
                 }
@@ -687,10 +691,11 @@ pub const TypeChecker = struct {
                 _ = try self.typeCheckNode(ref_node);
                 self.last_ref = ref_node;
 
-                if (self.types.get(ref_node)) |ty| break :blk ty;
-                if (self.declared_types.get(ref_node)) |ty| {
+                if (self.getType(ref_node)) |ty| break :blk ty;
+                if (self.getDeclaredType(ref_node)) |ty| {
                     break :blk if (!self.make_sym_ref) switch (ty.*) {
                         .owned_type => |base| self.interner.namedTy(base.binding),
+                        .alias => |_| ty,
                         else => ty,
                     } else ty;
                 }
@@ -717,7 +722,7 @@ pub const TypeChecker = struct {
 
                         while (left_ty.* == .named or left_ty.* == .owned_type) {
                             switch (left_ty.*) {
-                                .named => left_ty = self.declared_types.get(left_ty.named).?.owned_type.base,
+                                .named => left_ty = self.getDeclaredType(left_ty.named).?.owned_type.base,
                                 .owned_type => {
                                     orig_ty = self.interner.namedTy(left_ty.owned_type.binding);
                                     left_ty = left_ty.owned_type.base;
@@ -818,7 +823,9 @@ pub const TypeChecker = struct {
                 } else if (canCoerce(right_ty, left_ty)) {
                     std.debug.assert(self.coerceNode(expr.right, right_ty, left_ty));
                 } else if (left_ty != right_ty) {
-                    std.log.err("Type mismatch!!! {}", .{node_id});
+                    const lty_str = self.interner.printTyToStr(left_ty, self.arena);
+                    const rty_str = self.interner.printTyToStr(right_ty, self.arena);
+                    self.d.addErr(node_id, "Binary expression operand types do not match! LHS: {s}, RHS: {s}", .{ lty_str, rty_str }, .{});
                 }
 
                 break :blk switch (expr.op) {
@@ -848,6 +855,15 @@ pub const TypeChecker = struct {
             .key_value_ident => |kv| try self.typeCheckNode(kv.value),
             .key_value => |kv| try self.typeCheckNode(kv.value),
             .func => |func| blk: {
+                if (self.generic_ctx == null) {
+                    const func_path = self.analyzer.node_to_path.get(self.binding_node.?).?;
+                    const func_scope = self.analyzer.getScopeFromPath(func_path).?;
+
+                    if (func_scope.kind.func.generic) {
+                        return self.interner.unitTy();
+                    }
+                }
+
                 var param_tys = std.ArrayList(Type).init(self.arena);
                 const nodes = self.nodesRange(func.params);
 
@@ -869,8 +885,10 @@ pub const TypeChecker = struct {
 
                 ret_ty = if (ret_ty != null and ret_ty.?.* == .type)
                     ret_ty.?.type
+                else if (ret_ty != null and ret_ty.?.* == .alias)
+                    ret_ty.?.alias
                 else if (ret_ty == null) null else blk1: {
-                    std.log.err("Invalid Type", .{});
+                    self.d.addErr(func.ret_ty orelse node_id, "Invalid return type! Found null", .{}, .{});
                     break :blk1 self.interner.unitTy();
                 };
 
@@ -884,7 +902,15 @@ pub const TypeChecker = struct {
                         const last_ty = try self.typeCheckNode(block_nodes[block_nodes.len - 1]);
                         if (last_ty != self.interner.unitTy() and ret_ty != null) {
                             if (!self.coerceNode(block_nodes[block_nodes.len - 1], last_ty, ret_ty.?)) {
-                                std.log.err("Return value does not match function return type!", .{});
+                                const exp_str = self.interner.printTyToStr(ret_ty.?, self.arena);
+                                const got_str = self.interner.printTyToStr(last_ty, self.arena);
+
+                                self.d.addErr(
+                                    block_nodes[block_nodes.len - 1],
+                                    "Returned value does not match declared function return type! Expected {s} but found {s}",
+                                    .{ exp_str, got_str },
+                                    .{},
+                                );
                             }
                         }
                     }
@@ -924,11 +950,6 @@ pub const TypeChecker = struct {
                 break :blk self.interner.funcTyNoParams(ret_ty);
             },
             .invoke => |expr| blk: {
-                const call_ty = try self.typeCheckNode(expr.expr);
-                if (call_ty.* != .func) {
-                    std.log.err("Attempted to call a non function type!", .{});
-                    break :blk self.interner.unitTy();
-                }
 
                 // keep track of typechecked arguments. used for default args
                 var unchecked_args = std.bit_set.IntegerBitSet(256).initEmpty();
@@ -942,10 +963,61 @@ pub const TypeChecker = struct {
                     break :blk1 scope;
                 };
 
-                const expected_types = self.interner.getMultiTypes(call_ty.func.params);
-                unchecked_args.setRangeValue(.{ .start = 0, .end = expected_types.len }, true);
-
                 const arg_nodes = self.nodesRange(expr.args);
+
+                var call_ty = if (func_scope.kind.func.generic) blk1: {
+                    const old_bind = self.binding_node;
+                    const old_gen = self.generic_ctx;
+                    defer self.binding_node = old_bind;
+                    defer self.generic_ctx = old_gen;
+
+                    self.generic_ctx = node_id;
+                    self.binding_node = node_id;
+
+                    try self.generic_types.put(node_id, std.AutoHashMap(node.NodeId, Type).init(self.gpa));
+                    try self.generic_declared_types.put(node_id, std.AutoHashMap(node.NodeId, Type).init(self.gpa));
+
+                    {
+                        // @TODO: check trailing block arg
+                        for (arg_nodes, 0..) |arg_id, i| {
+                            // For the args passed in, we get the actual parameter index and compare the type
+                            // of the arg with the type of the function's paramater at that index.
+                            const param_node_id = self.analyzer.node_ref.get(arg_id) orelse @panic("unable to get node ref");
+                            const param_node = &self.nodes[param_node_id.index];
+                            const param = &param_node.kind.parameter;
+
+                            const param_name = try self.analyzer.getSegment(param.name) orelse @panic("Unable to get param segment");
+                            const param_scope = func_scope.children.get(param_name) orelse @panic("Couldn't get parameter in function");
+
+                            if (param_scope.kind.local.generic == null) {
+                                continue;
+                            }
+
+                            const arg_ty = try self.typeCheckNode(arg_id);
+                            const wild_ty = self.matchWildType(param.ty, arg_ty);
+
+                            try self.putDeclaredType(param_scope.kind.local.generic.?, self.interner.typeTy(wild_ty));
+                            _ = i;
+                        }
+                    }
+
+                    const fn_ty = try self.typeCheckNode(func_node.id);
+                    try self.declared_types.put(node_id, fn_ty);
+
+                    break :blk1 fn_ty;
+                } else null;
+
+                if (call_ty == null) {
+                    call_ty = try self.typeCheckNode(expr.expr);
+                }
+
+                if (call_ty.?.* != .func) {
+                    self.d.addErr(node_id, "Attempted to call a non function type!", .{}, .{});
+                    break :blk self.interner.unitTy();
+                }
+
+                const expected_types = self.interner.getMultiTypes(call_ty.?.func.params);
+                unchecked_args.setRangeValue(.{ .start = 0, .end = expected_types.len }, true);
 
                 const len = @min(expected_types.len, arg_nodes.len);
 
@@ -995,7 +1067,7 @@ pub const TypeChecker = struct {
                     }
                 }
 
-                break :blk if (call_ty.func.ret_ty) |ty|
+                break :blk if (call_ty.?.func.ret_ty) |ty|
                     ty
                 else
                     self.interner.unitTy();
@@ -1112,7 +1184,7 @@ pub const TypeChecker = struct {
                 }
 
                 const base = try self.typeCheckNode(expr.expr);
-                const ref_ty = self.declared_types.get(self.last_ref.?) orelse @panic("Unable to get declared type");
+                const ref_ty = self.getDeclaredType(self.last_ref.?) orelse @panic("Unable to get declared type");
 
                 const mutable = if (ref_ty.* == .reference) ref_ty.reference.mut else blk1: {
                     // Case when taking reference of actual variable
@@ -1160,7 +1232,7 @@ pub const TypeChecker = struct {
                 break :blk try self.typeCheckNode(vi.variant);
             },
             .implicit_variant => |iv| blk: {
-                const union_ty = self.declared_types.get(self.ty_hint.?.named).?.owned_type.base.@"union";
+                const union_ty = self.getDeclaredType(self.ty_hint.?.named).?.owned_type.base.@"union";
 
                 const variant_index = union_ty.variants.multi_type_keyed_impl;
                 const variants = &self.interner.multi_types_keyed.items[variant_index];
@@ -1183,12 +1255,16 @@ pub const TypeChecker = struct {
 
                 break :blk self.ty_hint.?;
             },
-            .parameter => |param| blk: {
+            .parameter => |param| {
                 const ty = try self.typeCheckNode(param.ty);
 
                 const actual_ty = if (ty.* == .type)
                     ty.type
-                else if (ty.* == .named) ty else blk1: {
+                else if (ty.* == .named)
+                    ty
+                else if (ty.* == .alias)
+                    ty.alias
+                else blk1: {
                     std.log.err("Invalid Type", .{});
                     std.debug.dumpCurrentStackTrace(null);
                     break :blk1 self.interner.unitTy();
@@ -1201,9 +1277,9 @@ pub const TypeChecker = struct {
                     }
                 }
 
-                try self.declared_types.put(node_id, actual_ty);
+                try self.putDeclaredType(node_id, actual_ty);
 
-                break :blk actual_ty;
+                return actual_ty;
             },
 
             .array_init_or_slice_one => |expr| blk: {
@@ -1219,7 +1295,7 @@ pub const TypeChecker = struct {
                     };
 
                     const record_node_id = self.ty_hint.?.named;
-                    const record_ty = self.declared_types.get(record_node_id).?.owned_type.base.record;
+                    const record_ty = self.getDeclaredType(record_node_id).?.owned_type.base.record;
 
                     const fields_index = record_ty.fields.multi_type_keyed_impl;
                     const fields = &self.interner.multi_types_keyed.items[fields_index];
@@ -1413,6 +1489,8 @@ pub const TypeChecker = struct {
                 const base_ty = try self.typeCheckNode(ty.ty);
                 if (base_ty.* == .named) {
                     break :blk self.interner.typeTy(self.interner.referenceTy(base_ty, ty.mut));
+                } else if (base_ty.* == .alias) {
+                    break :blk self.interner.typeTy(self.interner.referenceTy(base_ty.alias, ty.mut));
                 }
                 break :blk self.interner.typeTy(self.interner.referenceTy(base_ty.unwrapType(), ty.mut));
             },
@@ -1420,14 +1498,20 @@ pub const TypeChecker = struct {
                 const base_ty = try self.typeCheckNode(ty.ty);
                 if (base_ty.* == .named) {
                     break :blk self.interner.typeTy(self.interner.optionalTy(base_ty));
+                } else if (base_ty.* == .alias) {
+                    break :blk self.interner.typeTy(self.interner.optionalTy(base_ty.alias));
                 }
+
                 break :blk self.interner.typeTy(self.interner.optionalTy(base_ty.unwrapType()));
             },
             .type_alias => |id| blk: {
                 const original_ty = try self.typeCheckNode(id);
                 if (original_ty.* == .named) {
                     break :blk self.interner.typeTy(self.interner.aliasTy(original_ty));
+                } else if (original_ty.* == .alias) {
+                    break :blk self.interner.typeTy(self.interner.aliasTy(original_ty.alias));
                 }
+
                 break :blk self.interner.typeTy(self.interner.aliasTy(original_ty.unwrapType()));
             },
             .type_int => |size| blk: {
@@ -1446,16 +1530,34 @@ pub const TypeChecker = struct {
             },
             .type_bool => self.interner.typeTy(self.interner.boolTy()),
             .type_float => |size| self.interner.typeTy(self.interner.floatTy(size)),
+            .type_wild => |_| return self.getDeclaredType(node_id).?,
 
             else => blk: {
-                std.log.err("Unhandled case: {}", .{node_value});
+                std.log.err("Unhandled case (typecheck): {}", .{node_value});
                 break :blk self.interner.unitTy();
             },
         };
 
-        try self.types.put(node_id, ty);
+        try self.putType(node_id, ty);
 
         return ty;
+    }
+
+    fn matchWildType(self: *Self, varying_type: node.NodeId, match_ty: Type) Type {
+        const node_value = &self.nodes[varying_type.index];
+
+        return switch (node_value.kind) {
+            .type_wild => match_ty,
+            .type_ref => |tref| if (match_ty.* == .reference)
+                self.matchWildType(tref.ty, match_ty.reference.base)
+            else
+                match_ty,
+            .type_opt => |tref| if (match_ty.* == .optional)
+                self.matchWildType(tref.ty, match_ty.optional.base)
+            else
+                match_ty,
+            else => @panic("Unimlemented"),
+        };
     }
 
     fn evalConstValue(self: *Self, val: node.NodeId) !eval.Value {
@@ -1478,7 +1580,7 @@ pub const TypeChecker = struct {
         var base = ty;
 
         while (base.* == .named) {
-            base = self.declared_types.get(base.named).?.owned_type.base;
+            base = self.getDeclaredType(base.named).?.owned_type.base;
         }
 
         return base;
@@ -1487,8 +1589,7 @@ pub const TypeChecker = struct {
     pub fn coerceNode(self: *Self, node_id: node.NodeId, from: Type, to: Type) bool {
         if (from == to) return true;
         if (canCoerce(from, to)) {
-            const entry = self.types.getOrPut(node_id) catch @panic("Unable to getOrPut");
-            entry.value_ptr.* = to;
+            self.getOrPutType(node_id, to) catch @panic("Unable to getOrPut");
             return true;
         }
 
@@ -1535,6 +1636,65 @@ pub const TypeChecker = struct {
             },
             else => false,
         };
+    }
+
+    fn putType(self: *Self, node_id: node.NodeId, ty: Type) !void {
+        if (self.generic_ctx) |gtx| {
+            const entry = try self.generic_types.getOrPut(gtx);
+            if (!entry.found_existing) {
+                entry.value_ptr.* = std.AutoHashMap(node.NodeId, Type).init(self.gpa);
+            }
+
+            try entry.value_ptr.put(node_id, ty);
+        } else {
+            try self.types.put(node_id, ty);
+        }
+    }
+
+    fn getOrPutType(self: *Self, node_id: node.NodeId, ty: Type) !void {
+        if (self.generic_ctx) |gtx| {
+            const gentry = try self.generic_types.getOrPut(gtx);
+            if (!gentry.found_existing) {
+                gentry.value_ptr.* = std.AutoHashMap(node.NodeId, Type).init(self.gpa);
+            }
+
+            const entry = try gentry.value_ptr.getOrPut(node_id);
+            entry.value_ptr.* = ty;
+        } else {
+            const entry = try self.types.getOrPut(node_id);
+            entry.value_ptr.* = ty;
+        }
+    }
+
+    fn putDeclaredType(self: *Self, node_id: node.NodeId, ty: Type) !void {
+        if (self.generic_ctx) |gtx| {
+            const entry = try self.generic_declared_types.getOrPut(gtx);
+            if (!entry.found_existing) {
+                entry.value_ptr.* = std.AutoHashMap(node.NodeId, Type).init(self.gpa);
+            }
+
+            try entry.value_ptr.put(node_id, ty);
+        } else {
+            try self.declared_types.put(node_id, ty);
+        }
+    }
+
+    fn getType(self: *const Self, node_id: node.NodeId) ?Type {
+        if (self.generic_ctx) |gtx| {
+            const entry = self.generic_types.getEntry(gtx) orelse return null;
+            return entry.value_ptr.get(node_id);
+        } else {
+            return self.types.get(node_id);
+        }
+    }
+
+    fn getDeclaredType(self: *const Self, node_id: node.NodeId) ?Type {
+        if (self.generic_ctx) |gtx| {
+            const entry = self.generic_declared_types.getEntry(gtx) orelse return null;
+            return entry.value_ptr.get(node_id);
+        } else {
+            return self.declared_types.get(node_id);
+        }
     }
 
     inline fn nodesRange(self: *const Self, range: node.NodeRange) []const node.NodeId {

@@ -96,6 +96,9 @@ pub const Instruction = struct {
             .dereference => |expr| {
                 std.debug.print("  expr: {}-{}\n", .{ expr.expr.file, expr.expr.index });
             },
+            .direct_ref => |expr| {
+                std.debug.print("  to: {}-{}\n", .{ expr.file, expr.index });
+            },
             .if_expr => |expr| {
                 std.debug.print("  cond: {}-{}\n", .{ expr.cond.file, expr.cond.index });
                 // if (expr.captures) |capt| {
@@ -214,6 +217,7 @@ pub const InstructionKind = union(enum) {
         partial: bool,
         init: ?InstructionId,
     },
+    direct_ref: node.NodeId,
     @"break": struct {
         expr: ?InstructionId,
     },
@@ -269,6 +273,9 @@ pub const Evaluator = struct {
     functions: std.AutoHashMap(node.NodeId, FunctionValue),
     types: std.AutoHashMap(node.NodeId, TypeValue),
 
+    types_map: std.AutoHashMap(InstructionId, typecheck.Type),
+    declared_types_map: std.AutoHashMap(InstructionId, typecheck.Type),
+
     typechecker: *const typecheck.TypeChecker,
 
     bound_values: std.ArrayList(std.AutoHashMap(node.NodeId, BoundValue)),
@@ -278,6 +285,7 @@ pub const Evaluator = struct {
     variant_instr: ?InstructionId = null,
     greedy: bool = true,
     make_ref: bool = false,
+    generic_ctx: ?node.NodeId = null,
 
     const Self = @This();
 
@@ -305,6 +313,9 @@ pub const Evaluator = struct {
             .bound_values = std.ArrayList(std.AutoHashMap(node.NodeId, BoundValue)).init(gpa),
             .eval_const = false,
             .instr_to_node = std.AutoHashMap(InstructionId, node.NodeId).init(gpa),
+
+            .types_map = std.AutoHashMap(InstructionId, typecheck.Type).init(gpa),
+            .declared_types_map = std.AutoHashMap(InstructionId, typecheck.Type).init(gpa),
         };
     }
 
@@ -323,9 +334,34 @@ pub const Evaluator = struct {
             }
         }
 
+        {
+            std.debug.print("Declared Types: \n", .{});
+            var it = self.declared_types_map.iterator();
+            while (it.next()) |ty| {
+                self.printTypeMap(ty.key_ptr.*, ty.value_ptr.*);
+                std.debug.print("\n", .{});
+            }
+        }
+
+        {
+            std.debug.print("Node Types: \n", .{});
+            var it = self.types_map.iterator();
+            while (it.next()) |ty| {
+                self.printTypeMap(ty.key_ptr.*, ty.value_ptr.*);
+                std.debug.print("\n", .{});
+            }
+        }
+
         const starti = self.instruction_ranges.items.len;
         try self.instruction_ranges.appendSlice(these_instrs.items);
         return self.instruction_ranges.items[starti..];
+    }
+
+    fn printTypeMap(self: *const Self, instr_id: InstructionId, ty: typecheck.Type) void {
+        std.debug.print("Instr: ", .{});
+        typecheck.TypeChecker.printIntCol(instr_id.index);
+        std.debug.print(" => ", .{});
+        self.typechecker.interner.printTy(ty);
     }
 
     pub fn evalNode(self: *Self, id: node.NodeId) EvalError!?InstructionId {
@@ -364,7 +400,7 @@ pub const Evaluator = struct {
                         @panic("value not bound!");
                     }
                 } else {
-                    break :blk try self.createInstruction(.{ .identifier = ref_node.value_ptr.* });
+                    break :blk try self.createInstruction(.{ .identifier = ref_node.value_ptr.* }, id);
                 }
             },
             .binary_expr => |expr| blk: {
@@ -456,14 +492,14 @@ pub const Evaluator = struct {
                 switch (expr.op) {
                     .member_access => {
                         var ref_ns_type = false;
-                        var orig_ty = self.typechecker.types.get(expr.left).?;
+                        var orig_ty = self.getType(expr.left).?;
                         const rhs = self.nodes[expr.right.index].kind.identifier;
 
                         var left_ty = orig_ty.unwrapToRefBase();
 
                         while (left_ty.* == .named or left_ty.* == .owned_type) {
                             switch (left_ty.*) {
-                                .named => left_ty = self.typechecker.declared_types.get(left_ty.named).?.owned_type.base,
+                                .named => left_ty = self.getDeclaredType(left_ty.named).?.owned_type.base,
                                 .owned_type => {
                                     orig_ty = self.typechecker.interner.namedTy(left_ty.owned_type.binding);
                                     left_ty = left_ty.owned_type.base;
@@ -493,7 +529,7 @@ pub const Evaluator = struct {
                                             .init = self.variant_instr,
                                             .partial = partial,
                                         },
-                                    });
+                                    }, id);
                                 },
                                 else => {
                                     const left_ty_str = self.typechecker.interner.printTyToStr(left_ty, self.arena);
@@ -513,7 +549,7 @@ pub const Evaluator = struct {
                                             .expr = lvalid,
                                             .index = fields.getIndex(rhs).?,
                                         },
-                                    });
+                                    }, id);
                                 },
                                 .@"union" => |un| {
                                     const variant_index = un.variants.multi_type_keyed_impl;
@@ -526,7 +562,7 @@ pub const Evaluator = struct {
                                             .expr = lvalid,
                                             .index = var_index,
                                         },
-                                    });
+                                    }, id);
                                 },
                                 else => {
                                     const left_ty_str = self.typechecker.interner.printTyToStr(left_ty, self.arena);
@@ -569,7 +605,7 @@ pub const Evaluator = struct {
                                     .op = op,
                                     .right = rvalid,
                                 },
-                            });
+                            }, id);
                         } else rvalid;
 
                         break :blk try self.createInstruction(.{
@@ -577,7 +613,7 @@ pub const Evaluator = struct {
                                 .left = lvalid,
                                 .right = new_value,
                             },
-                        });
+                        }, id);
                     },
                     else => {},
                 }
@@ -588,7 +624,7 @@ pub const Evaluator = struct {
                         .op = expr.op,
                         .right = rvalid,
                     },
-                });
+                }, id);
             },
             .unary_expr => |expr| blk: {
                 const expr_id = try self.evalNode(expr.expr) orelse @panic("Invalid operand");
@@ -620,7 +656,7 @@ pub const Evaluator = struct {
                         .op = expr.op,
                         .expr = expr_id,
                     },
-                });
+                }, id);
             },
             .if_expr => |expr| blk: {
                 const save_point = self.save();
@@ -667,7 +703,7 @@ pub const Evaluator = struct {
                         .true_block = true_block,
                         .false_block = false_block,
                     },
-                });
+                }, id);
             },
             .loop => |expr| blk: {
                 const save_point = self.save();
@@ -737,7 +773,7 @@ pub const Evaluator = struct {
                         .@"break" = .{
                             .expr = null,
                         },
-                    }));
+                    }, id));
 
                     starti = self.instruction_ranges.items.len;
                     try self.instruction_ranges.append(try self.createInstruction(.{
@@ -752,7 +788,7 @@ pub const Evaluator = struct {
                                 .len = 0,
                             },
                         },
-                    }));
+                    }, id));
                     add_len = 1;
                 }
 
@@ -764,7 +800,7 @@ pub const Evaluator = struct {
                     .loop = .{
                         .loop_block = loop_block,
                     },
-                });
+                }, id);
 
                 if (expr.else_block) |eblock| {
                     if (expr.expr) |cond| {
@@ -784,7 +820,7 @@ pub const Evaluator = struct {
                                 },
                                 .false_block = else_block,
                             },
-                        });
+                        }, id);
                     } else {
                         break :blk loop;
                     }
@@ -797,9 +833,9 @@ pub const Evaluator = struct {
                     @panic("Unimplemetned");
                 }
 
-                var ty = self.typechecker.types.get(id) orelse @panic("Unable to get node type");
+                var ty = self.getType(id) orelse @panic("Unable to get node type");
                 if (ty.* == .named) {
-                    ty = self.typechecker.declared_types.get(ty.named).?.owned_type.base;
+                    ty = self.getDeclaredType(ty.named).?.owned_type.base;
                 }
                 switch (ty.*) {
                     .record => |record_ty| {
@@ -858,7 +894,7 @@ pub const Evaluator = struct {
                                     .len = @truncate(self.instruction_ranges.items.len - starti),
                                 },
                             },
-                        });
+                        }, id);
                     },
                     else => {
                         const starti = self.instruction_ranges.items.len;
@@ -871,7 +907,7 @@ pub const Evaluator = struct {
                                     .len = 1,
                                 },
                             },
-                        });
+                        }, id);
                     },
                 }
             },
@@ -883,93 +919,18 @@ pub const Evaluator = struct {
                 const range = try self.evalRange(ai.exprs);
                 break :blk try self.createInstruction(.{
                     .array_init = .{ .exprs = range },
-                });
+                }, id);
             },
             .binding => |bind| blk: {
-                if (self.typechecker.declared_types.get(id)) |ty| {
+                if (self.getDeclaredType(id)) |ty| {
                     if (ty.* == .owned_type or ty.* == .func) {
-                        const value_node = self.nodes[bind.value.index];
-                        switch (value_node.kind) {
-                            .func => |func| {
-                                const instrs = if (func.block) |body| blk1: {
-                                    var instructions = try self.evalRange(body);
-                                    if (instructions.len > 0) {
-                                        const last_instr = self.instruction_ranges.items[instructions.start + instructions.len - 1];
-                                        const last_node = self.node_ranges[body.start + body.len - 1];
-                                        const last_instr_ty = self.typechecker.types.getEntry(last_node) orelse @panic("Unable to get type entry for last instructino!");
-                                        const fn_ret_ty = ty.func.ret_ty;
-                                        //
-                                        // TODO: check if return instruction
-                                        std.debug.assert((last_instr_ty.value_ptr.*.* == .unit and fn_ret_ty == null) or (last_instr_ty.value_ptr.*) == (fn_ret_ty.?));
-
-                                        const instr = try self.createInstruction(.{ .ret = .{ .expr = last_instr } });
-                                        // try self.instruction_ranges.append(instr);
-                                        self.instruction_ranges.items[self.instruction_ranges.items.len - 1] = instr;
-                                    } else {
-                                        const instr = try self.createInstruction(.{ .ret = .{ .expr = null } });
-                                        try self.instruction_ranges.append(instr);
-                                        // self.instruction_ranges.items[self.instruction_ranges.items.len - 1] = instr;
-                                        instructions.len += 1;
-                                    }
-                                    break :blk1 instructions;
-                                } else null;
-
-                                try self.functions.put(id, .{
-                                    .node_id = bind.value,
-                                    .instructions = instrs,
-                                });
-                            },
-                            .func_no_params => |func| {
-                                const instrs = if (func.block) |body| blk1: {
-                                    var instructions = try self.evalRange(body);
-                                    if (instructions.len > 0) {
-                                        const last_instr = self.instruction_ranges.items[instructions.start + instructions.len - 1];
-                                        const last_node = self.node_ranges[body.start + body.len - 1];
-                                        const last_instr_ty = self.typechecker.types.getEntry(last_node) orelse @panic("Unable to get type entry for last instructino!");
-                                        const fn_ret_ty = ty.func.ret_ty;
-                                        //
-                                        // TODO: check if return instruction
-                                        std.debug.assert((last_instr_ty.value_ptr.*.* == .unit and fn_ret_ty == null) or (last_instr_ty.value_ptr.*) == (fn_ret_ty.?));
-
-                                        const instr = try self.createInstruction(.{ .ret = .{ .expr = last_instr } });
-                                        // try self.instruction_ranges.append(instr);
-                                        self.instruction_ranges.items[self.instruction_ranges.items.len - 1] = instr;
-                                    } else {
-                                        const instr = try self.createInstruction(.{ .ret = .{ .expr = null } });
-                                        try self.instruction_ranges.append(instr);
-                                        // self.instruction_ranges.items[self.instruction_ranges.items.len - 1] = instr;
-                                        instructions.len += 1;
-                                    }
-                                    break :blk1 instructions;
-                                } else null;
-
-                                // instructions.len += 1;
-                                try self.functions.put(id, .{
-                                    .node_id = bind.value,
-                                    .instructions = instrs,
-                                });
-                            },
-                            .type_record,
-                            .type_union,
-                            .type_alias,
-                            .type_ref,
-                            .type_opt,
-                            .type_int,
-                            .type_uint,
-                            .type_float,
-                            .identifier,
-                            => {
-                                try self.types.put(id, .{
-                                    .node_id = bind.value,
-                                    // .ty = ty.named,
-                                });
-                            },
-                            else => std.debug.panic("Unimplemented {}", .{value_node}),
-                        }
-                        // @TODO: put these into global defs
+                        try self.evalTypeOrFunc(id, ty, bind.value);
                         break :blk null;
                     }
                 }
+                if (self.getType(bind.value) == null)
+                    break :blk null; // Should be generic. @TODO: Maybe do better checking
+
                 const instruction = try self.evalNode(bind.value) orelse @panic("Invalid operand");
 
                 if (self.eval_const or self.instructions.items[instruction.index].kind == .constant) {
@@ -988,7 +949,7 @@ pub const Evaluator = struct {
                         .tags = bind.tags,
                         .value = instruction,
                     },
-                });
+                }, id);
             },
             .reference => |expr| blk: {
                 if (self.eval_const) {
@@ -1000,7 +961,7 @@ pub const Evaluator = struct {
                     .reference = .{
                         .expr = value,
                     },
-                });
+                }, id);
             },
             .dereference => |expr| blk: {
                 if (self.eval_const) {
@@ -1012,7 +973,7 @@ pub const Evaluator = struct {
                     .dereference = .{
                         .expr = value,
                     },
-                });
+                }, id);
             },
             .const_expr => |expr| blk: {
                 const old_eval = self.eval_const;
@@ -1046,8 +1007,8 @@ pub const Evaluator = struct {
                 break :blk try self.evalNode(vi.variant);
             },
             .implicit_variant => |iv| blk: {
-                const union_named_ty = self.typechecker.types.get(id).?.named;
-                const union_ty = self.typechecker.declared_types.get(union_named_ty).?.owned_type.base.@"union";
+                const union_named_ty = self.getType(id).?.named;
+                const union_ty = self.getDeclaredType(union_named_ty).?.owned_type.base.@"union";
 
                 const variant_index = union_ty.variants.multi_type_keyed_impl;
                 const variants = &self.typechecker.interner.multi_types_keyed.items[variant_index];
@@ -1065,17 +1026,16 @@ pub const Evaluator = struct {
                         .init = self.variant_instr,
                         .partial = partial,
                     },
-                });
+                }, id);
             },
             // @TODO: Maybe do something with key here?
             .key_value => |kv| try self.evalNode(kv.value),
             .key_value_ident => |kv| try self.evalNode(kv.value),
             .argument => |expr| try self.createInstruction(.{
                 .argument = try self.evalNode(expr) orelse @panic("invalid arg"),
-            }),
+            }, id),
             .invoke => |inv| blk: {
                 const saved = self.save();
-                const expr_id = try self.evalNode(inv.expr) orelse @panic("Invalid function");
 
                 // Get referenced function info
                 const ref_node_id = self.analyzer.node_ref.get(id) orelse @panic("uanble to get node ref");
@@ -1087,7 +1047,25 @@ pub const Evaluator = struct {
                     break :blk1 scope;
                 };
 
-                const fn_ty = self.typechecker.types.get(inv.expr) orelse @panic("No type info for callee");
+                var expr_id: InstructionId = undefined;
+                var fn_ty: typecheck.Type = undefined;
+
+                if (self.typechecker.generic_types.contains(id)) {
+                    const old_gen = self.generic_ctx;
+                    defer self.generic_ctx = old_gen;
+
+                    self.generic_ctx = id;
+                    fn_ty = self.typechecker.declared_types.get(id).?;
+
+                    try self.evalTypeOrFunc(id, fn_ty, func_node.id);
+
+                    expr_id = try self.createInstructionWithType(.{ .direct_ref = id }, fn_ty);
+                    try self.instr_to_node.put(expr_id, id);
+                } else {
+                    expr_id = try self.evalNode(inv.expr) orelse @panic("Invalid function");
+                    fn_ty = self.typechecker.types.get(inv.expr) orelse @panic("No type info for callee");
+                }
+
                 const expected_types = self.typechecker.interner.getMultiTypes(fn_ty.func.params);
 
                 var ordered_args = std.ArrayList(InstructionId).init(self.arena);
@@ -1191,7 +1169,7 @@ pub const Evaluator = struct {
                             .len = @truncate(self.instruction_ranges.items.len - starti),
                         },
                     },
-                });
+                }, id);
             },
             .subscript => |sub| blk: {
                 if (self.eval_const) {
@@ -1206,10 +1184,11 @@ pub const Evaluator = struct {
                         .expr = expr_id,
                         .sub = sub_id,
                     },
-                });
+                }, id);
             },
             else => blk: {
                 std.log.err("Unhandled node: {}", .{node_value});
+                std.debug.dumpCurrentStackTrace(null);
                 // break :blk try self.createConst(.undef);
                 break :blk null;
             },
@@ -1222,9 +1201,90 @@ pub const Evaluator = struct {
         // if (result) |res| {
         //     std.log.info("{} {}", .{ res.index, id.index });
         // }
-        // std.debug.dumpCurrentStackTrace(null);
 
         return result;
+    }
+
+    fn evalTypeOrFunc(self: *Self, bind_id: node.NodeId, ty: typecheck.Type, id: node.NodeId) !void {
+        const value_node = self.nodes[id.index];
+        switch (value_node.kind) {
+            .func => |func| {
+                const instrs = if (func.block) |body| blk1: {
+                    var instructions = try self.evalRange(body);
+                    if (instructions.len > 0) {
+                        const last_instr = self.instruction_ranges.items[instructions.start + instructions.len - 1];
+                        const last_node = self.node_ranges[body.start + body.len - 1];
+                        std.log.info("fsdf {}", .{last_node});
+                        const last_instr_ty = self.getType(last_node) orelse @panic("Unable to get type entry for last instructino!");
+                        const fn_ret_ty = ty.func.ret_ty;
+                        //
+                        // TODO: check if return instruction
+                        std.debug.assert((last_instr_ty.* == .unit and fn_ret_ty == null) or last_instr_ty == (fn_ret_ty.?));
+
+                        const instr = try self.createInstruction(.{ .ret = .{ .expr = last_instr } }, id);
+                        // try self.instruction_ranges.append(instr);
+                        self.instruction_ranges.items[self.instruction_ranges.items.len - 1] = instr;
+                    } else {
+                        const instr = try self.createInstruction(.{ .ret = .{ .expr = null } }, id);
+                        try self.instruction_ranges.append(instr);
+                        // self.instruction_ranges.items[self.instruction_ranges.items.len - 1] = instr;
+                        instructions.len += 1;
+                    }
+                    break :blk1 instructions;
+                } else null;
+
+                try self.functions.put(bind_id, .{
+                    .node_id = id,
+                    .instructions = instrs,
+                });
+            },
+            .func_no_params => |func| {
+                const instrs = if (func.block) |body| blk1: {
+                    var instructions = try self.evalRange(body);
+                    if (instructions.len > 0) {
+                        const last_instr = self.instruction_ranges.items[instructions.start + instructions.len - 1];
+                        const last_node = self.node_ranges[body.start + body.len - 1];
+                        const last_instr_ty = self.getType(last_node) orelse @panic("Unable to get type entry for last instructino!");
+                        const fn_ret_ty = ty.func.ret_ty;
+                        //
+                        // TODO: check if return instruction
+                        std.debug.assert((last_instr_ty.* == .unit and fn_ret_ty == null) or last_instr_ty == (fn_ret_ty.?));
+
+                        const instr = try self.createInstruction(.{ .ret = .{ .expr = last_instr } }, id);
+                        // try self.instruction_ranges.append(instr);
+                        self.instruction_ranges.items[self.instruction_ranges.items.len - 1] = instr;
+                    } else {
+                        const instr = try self.createInstruction(.{ .ret = .{ .expr = null } }, id);
+                        try self.instruction_ranges.append(instr);
+                        // self.instruction_ranges.items[self.instruction_ranges.items.len - 1] = instr;
+                        instructions.len += 1;
+                    }
+                    break :blk1 instructions;
+                } else null;
+
+                // instructions.len += 1;
+                try self.functions.put(bind_id, .{
+                    .node_id = id,
+                    .instructions = instrs,
+                });
+            },
+            .type_record,
+            .type_union,
+            .type_alias,
+            .type_ref,
+            .type_opt,
+            .type_int,
+            .type_uint,
+            .type_float,
+            .identifier,
+            => {
+                try self.types.put(bind_id, .{
+                    .node_id = id,
+                    // .ty = ty.named,
+                });
+            },
+            else => std.debug.panic("Unimplemented {}", .{value_node}),
+        }
     }
 
     fn evalBin(lval: Value, rval: Value, op: node.Operator) ?ValueKind {
@@ -1358,6 +1418,25 @@ pub const Evaluator = struct {
         return null;
     }
 
+    fn getType(self: *const Self, node_id: node.NodeId) ?typecheck.Type {
+        if (self.generic_ctx) |gtx| {
+            std.log.debug("generic ctx {}", .{gtx});
+            const entry = self.typechecker.generic_types.getEntry(gtx) orelse return null;
+            return entry.value_ptr.get(node_id);
+        } else {
+            return self.typechecker.types.get(node_id);
+        }
+    }
+
+    fn getDeclaredType(self: *const Self, node_id: node.NodeId) ?typecheck.Type {
+        if (self.generic_ctx) |gtx| {
+            const entry = self.typechecker.generic_declared_types.getEntry(gtx) orelse return null;
+            return entry.value_ptr.get(node_id);
+        } else {
+            return self.typechecker.declared_types.get(node_id);
+        }
+    }
+
     inline fn isConst(self: *Self, id: InstructionId) bool {
         return self.instructions.items[id.index].kind == .constant;
     }
@@ -1379,7 +1458,7 @@ pub const Evaluator = struct {
         self.instruction_ranges.items.len = save_point.instruction_range_length;
     }
 
-    fn createInstruction(self: *Self, kind: InstructionKind) !InstructionId {
+    fn createInstruction(self: *Self, kind: InstructionKind, original_node: node.NodeId) !InstructionId {
         const index: u32 = @truncate(self.instructions.items.len);
 
         try self.instructions.append(.{
@@ -1390,6 +1469,65 @@ pub const Evaluator = struct {
             .kind = kind,
             .value = null,
         });
+
+        if (self.getType(original_node)) |ty| {
+            try self.types_map.put(.{
+                .file = 0,
+                .index = index,
+            }, ty);
+        }
+        if (self.getDeclaredType(original_node)) |ty| {
+            try self.declared_types_map.put(.{
+                .file = 0,
+                .index = index,
+            }, ty);
+        }
+
+        return .{
+            .file = 0,
+            .index = index,
+        };
+    }
+
+    fn createInstructionWithDeclaredType(self: *Self, kind: InstructionKind, decl_ty: typecheck.Type) !InstructionId {
+        const index: u32 = @truncate(self.instructions.items.len);
+
+        try self.instructions.append(.{
+            .id = .{
+                .file = 0,
+                .index = index,
+            },
+            .kind = kind,
+            .value = null,
+        });
+
+        try self.declared_types_map.put(.{
+            .file = 0,
+            .index = index,
+        }, decl_ty);
+
+        return .{
+            .file = 0,
+            .index = index,
+        };
+    }
+
+    fn createInstructionWithType(self: *Self, kind: InstructionKind, ty: typecheck.Type) !InstructionId {
+        const index: u32 = @truncate(self.instructions.items.len);
+
+        try self.instructions.append(.{
+            .id = .{
+                .file = 0,
+                .index = index,
+            },
+            .kind = kind,
+            .value = null,
+        });
+
+        try self.types_map.put(.{
+            .file = 0,
+            .index = index,
+        }, ty);
 
         return .{
             .file = 0,
