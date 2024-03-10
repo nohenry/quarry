@@ -16,7 +16,7 @@ pub const Value = struct {
             .float => |fvalue| std.debug.print("{}", .{fvalue}),
             .bool => |bvalue| std.debug.print("{}", .{bvalue}),
             .str => |svalue| std.debug.print("{s}", .{svalue}),
-            .func => |func| std.debug.print("Func {}-{} and {}-{}", .{ func.node_id.file, func.node_id.index, func.instructions.start, func.instructions.len }),
+            .func => |func| std.debug.print("Func {}-{} and {}-{}", .{ func.node_id.file, func.node_id.index, if (func.instructions) |fi| fi.start else 0, if (func.instructions) |fi| fi.len else 0 }),
             .ref => |ref| std.debug.print("Ref mut:{} {}-{}", .{ ref.mutable, ref.node_id.file, ref.node_id.index }),
             .undef => std.debug.print("undef", .{}),
         }

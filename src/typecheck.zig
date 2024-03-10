@@ -381,7 +381,7 @@ pub const TypeInterner = struct {
             .reference => |val| {
                 try self.printTyWriter(val.base, writer);
                 if (val.mut)
-                    try writer.print("mut ", .{});
+                    try writer.print(" mut", .{});
                 try writer.print("&", .{});
             },
             .record => |rec| {
@@ -1001,7 +1001,7 @@ pub const TypeChecker = struct {
                     self.interner.unitTy();
             },
             .subscript => |sub| blk: {
-                var expr_ty = try self.typeCheckNode(sub.expr);
+                const expr_ty = try self.typeCheckNode(sub.expr);
                 const sub_ty = try self.typeCheckNode(sub.sub);
                 switch (sub_ty.*) {
                     .int, .uint, .iptr, .uptr, .int_literal => {},
@@ -1010,14 +1010,15 @@ pub const TypeChecker = struct {
                     },
                 }
 
-                expr_ty = expr_ty.unwrapToRefBase();
+                // expr_ty = expr_ty.unwrapToRefBase();
 
                 break :blk switch (expr_ty.*) {
                     .array => |arr| arr.base,
                     .reference => |ref| ref.base,
                     .slice => |slice| slice.base,
                     else => {
-                        std.log.err("Tried to subscript non subsciptable type! Expected array, slice, or indexable reference", .{});
+                        const ty_str = self.interner.printTyToStr(expr_ty, self.arena);
+                        self.d.addErr(sub.expr, "Tried to subscript non subsciptable type! Expected array, slice, or indexable reference. Found {s}", .{ty_str}, .{});
                         break :blk self.interner.unitTy();
                     },
                 };

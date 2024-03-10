@@ -554,6 +554,11 @@
     }
   },
   {
+    "type": "number",
+    "named": true,
+    "fields": {}
+  },
+  {
     "type": "paramater_list",
     "named": true,
     "fields": {
@@ -1170,10 +1175,6 @@
   },
   {
     "type": "none",
-    "named": true
-  },
-  {
-    "type": "number",
     "named": true
   },
   {

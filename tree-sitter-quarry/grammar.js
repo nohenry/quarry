@@ -335,7 +335,7 @@ module.exports = grammar({
         identifier: ($) => /[:a-zA-Z_][a-z_A-Z0-9]*/,
         type_identifier: ($) => /[A-Z][a-z_A-Z0-9]*/,
 
-        number: ($) => /\d+/,
+        number: ($) => choice(/0x[0-9a-fA-F]+/, /0b[01]*/, /0o[0-7]*/, /\d+(\.\d+)?/),
         comment: (_) =>
             token(
                 choice(

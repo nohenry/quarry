@@ -529,7 +529,7 @@ pub const CodeGenerator = struct {
                             else => @panic("Unhandled binop operaotr"),
                         };
                     },
-                    else => @panic("Unhandled binop type"),
+                    else => std.debug.panic("Unhandled binop type {}", .{binop.op}),
                 };
             },
             .unary_expr => |unary| {
@@ -613,21 +613,27 @@ pub const CodeGenerator = struct {
                 return result;
             },
             .subscript => |sub| blk: {
-                var ll_expr = try self.genWithRef(true, genInstr, .{ self, sub.expr }) orelse @panic("Unable to get subscript expression!");
+                const ll_sub = blk1: {
+                    const old_mr = self.make_ref;
+                    defer self.make_ref = old_mr;
+                    self.make_ref = false;
 
-                const ll_sub = try self.genWithTypeHint(self.typechecker.interner.uintTy(64), genInstr, .{ self, sub.sub }) orelse @panic("Unable to get subscript sub!");
+                    break :blk1 try self.genWithTypeHint(self.typechecker.interner.uintTy(64), genInstr, .{ self, sub.sub }) orelse @panic("Unable to get subscript sub!");
+                };
 
                 const node_id = self.evaluator.instr_to_node.get(sub.expr) orelse @panic("Unable to get node id of subscript expression");
-                var node_ty = self.typechecker.types.get(node_id) orelse @panic("Unable to get node type of subscript expression");
-                while (node_ty.* == .reference) {
-                    const llty_tmp = try self.genType(node_ty, .{});
-                    ll_expr = ir.LLVMBuildLoad2(self.builder, llty_tmp, ll_expr, @as(cstr, ""));
-                    node_ty = node_ty.reference.base;
-                }
+                const node_ty = self.typechecker.types.get(node_id) orelse @panic("Unable to get node type of subscript expression");
+                // while (node_ty.* == .reference) {
+                //     const llty_tmp = try self.genType(node_ty, .{});
+                //     ll_expr = ir.LLVMBuildLoad2(self.builder, llty_tmp, ll_expr, @as(cstr, ""));
+                //     node_ty = node_ty.reference.base;
+                // }
                 const llty = try self.genType(node_ty, .{});
 
                 switch (node_ty.*) {
                     .array => |arr_ty| {
+                        const ll_expr = try self.genWithRef(true, genInstr, .{ self, sub.expr }) orelse @panic("Unable to get subscript expression!");
+
                         const value = ir.LLVMBuildZExtOrBitCast(self.builder, ll_sub, ir.LLVMInt64TypeInContext(self.context), @as(cstr, ""));
                         var indicies = [2]ir.LLVMValueRef{ ir.LLVMConstInt(ir.LLVMInt64TypeInContext(self.context), 0, 0), value };
                         const ptr = ir.LLVMBuildInBoundsGEP2(self.builder, llty, ll_expr, @ptrCast(&indicies), @intCast(indicies.len), @as(cstr, ""));
@@ -638,7 +644,24 @@ pub const CodeGenerator = struct {
                             break :blk ir.LLVMBuildLoad2(self.builder, ll_base, ptr, @as(cstr, ""));
                         }
                     },
+                    .reference => |ref_ty| {
+                        const ll_expr = try self.genWithRef(false, genInstr, .{ self, sub.expr }) orelse @panic("Unable to get subscript expression!");
+                        const ll_basety = try self.genType(ref_ty.base, .{});
+
+                        const value = ir.LLVMBuildIntCast(self.builder, ll_sub, ir.LLVMInt64TypeInContext(self.context), @as(cstr, ""));
+                        var indicies = [1]ir.LLVMValueRef{value};
+                        const ptr = ir.LLVMBuildInBoundsGEP2(self.builder, ll_basety, ll_expr, @ptrCast(&indicies), @intCast(indicies.len), @as(cstr, ""));
+
+                        if (self.make_ref) {
+                            break :blk ptr;
+                        } else {
+                            const ll_base = try self.genType(ref_ty.base, .{});
+                            break :blk ir.LLVMBuildLoad2(self.builder, ll_base, ptr, @as(cstr, ""));
+                        }
+                    },
                     .slice => |slc_ty| {
+                        const ll_expr = try self.genWithRef(true, genInstr, .{ self, sub.expr }) orelse @panic("Unable to get subscript expression!");
+
                         const base_ty = try self.genType(slc_ty.base, .{});
 
                         const value = ir.LLVMBuildZExtOrBitCast(self.builder, ll_sub, ir.LLVMInt64TypeInContext(self.context), @as(cstr, ""));

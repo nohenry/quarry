@@ -1,6 +1,11 @@
 
 let main = (int8 argc) int8 {
     let value = malloc(200000)
+    uint mut i = 0
+    loop i < 20000 {
+        value[i] = 0xdd
+        i += 1
+    }
     argc * 2
 }
 
@@ -76,4 +81,3 @@ let test_array3 = (int8 value) int8 {
 }
 
 extern let malloc = (int size) uint8&
-
