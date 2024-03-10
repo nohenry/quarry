@@ -430,12 +430,15 @@ pub const Analyzer = struct {
             .invoke => |expr| blk: {
                 try self.analyzeNode(expr.expr);
                 if (self.last_deferred) {
+                    // If the function is deferred, we also must defer this function since we don't know the parameters at this point
                     try self.deferred_nodes.append(.{
                         .path = try self.pathFromCurrent(),
                         .node = index,
                     });
                     self.last_deferred = false;
+                    break :blk;
                 }
+
                 var doing_named: bool = false;
 
                 const func_scope = if (self.last_ref) |ref| blk1: {
