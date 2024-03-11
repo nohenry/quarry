@@ -128,11 +128,20 @@ pub const CodeGenerator = struct {
 
         var ty_it = self.evaluator.types.iterator();
         while (ty_it.next()) |ty| {
-            const path = self.analyzer.node_to_path.get(ty.key_ptr.*) orelse @panic("can't get path");
-            const name = try self.manglePath(path, null);
+            var fid = ty.key_ptr.*;
+            if (self.analyzer.node_ref.get(fid)) |new_id| {
+                fid = new_id;
+            }
+
+            const path = self.analyzer.node_to_path.get(fid) orelse @panic("can't get path");
+            const rec_scope = self.analyzer.getScopeFromPath(path).?;
+
+            const name = try self.manglePath(path, if (rec_scope.kind.type.generic) ty.key_ptr.* else null);
             const named_struct = ir.LLVMStructCreateNamed(self.context, name.ptr);
 
-            const tyty = self.typechecker.types.get(ty.value_ptr.node_id) orelse @panic("Unable to get type for named type");
+            const tyty = self.typechecker.types.get(ty.value_ptr.node_id) orelse
+                self.typechecker.generic_types.get(ty.key_ptr.*).?.get(ty.value_ptr.node_id).?;
+
             // const base_ty = self.typechecker.types.get(tyty.named).?;
             _ = try self.genType(tyty.type, .{ .named_struct = named_struct });
             try self.type_map.put(ty.key_ptr.*, named_struct);
@@ -204,7 +213,8 @@ pub const CodeGenerator = struct {
             break :blk try self.arena.dupeZ(u8, name);
         } else try self.manglePath(path, if (fun_scope.kind.func.generic) bind_id else null); // @TODO: mangled names should use generic argument hash
 
-        const fn_ty = self.typechecker.types.get(func.node_id) orelse self.typechecker.generic_types.get(bind_id).?.get(func.node_id).?;
+        const fn_ty = self.typechecker.types.get(func.node_id) orelse
+            self.typechecker.generic_types.get(bind_id).?.get(func.node_id).?;
         const llvm_fn_ty = try self.genType(fn_ty, .{});
 
         const llvm_func = ir.LLVMAddFunction(self.module, func_name.ptr, llvm_fn_ty);
@@ -890,8 +900,8 @@ pub const CodeGenerator = struct {
                 break :blk ir.LLVMBuildLoad2(self.builder, llvm_ty, value, @as(cstr, ""));
             },
             .record_init => |ri| blk: {
-                const node_id = self.evaluator.instr_to_node.get(instr_id) orelse @panic("Unable to get node id of invoke");
-                const ref_node = self.analyzer.node_ref.get(node_id) orelse @panic("Unable tog et node ref");
+                // const node_id = self.evaluator.instr_to_node.get(instr_id) orelse @panic("Unable to get node id of invoke");
+                // const ref_node = self.analyzer.node_ref.get(node_id) orelse @panic("Unable tog et node ref");
                 const node_ty = self.getType(instr_id) orelse @panic("Unable to get node type");
 
                 const record_ty = self.typechecker.declared_types.get(node_ty.named).?.owned_type.base.record;
@@ -901,7 +911,7 @@ pub const CodeGenerator = struct {
                 var ll_vals = std.ArrayList(ir.LLVMValueRef).init(self.arena);
                 try ll_vals.ensureTotalCapacity(fields.count());
 
-                const ll_structty = self.type_map.get(ref_node) orelse @panic("Unable to get type");
+                const ll_structty = self.type_map.get(node_ty.named) orelse @panic("Unable to get type");
                 var is_const: bool = true;
 
                 {

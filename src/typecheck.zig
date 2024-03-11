@@ -467,8 +467,10 @@ pub const GenericCacheContext = struct {
         if (key == .impl) {
             const vals = ctx.cache.items.items[key.impl.start .. key.impl.start + key.impl.len];
             std.hash.autoHashStrat(&hasher, vals, .Deep);
+            std.hash.autoHash(&hasher, key.impl.id);
         } else {
-            std.hash.autoHashStrat(&hasher, key.items, .Deep);
+            std.hash.autoHashStrat(&hasher, key.items.items, .Deep);
+            std.hash.autoHash(&hasher, key.items.id);
         }
 
         return hasher.final();
@@ -479,11 +481,12 @@ pub const GenericCacheContext = struct {
             .items => |vals| {
                 if (b != .impl) return false;
                 const ind = b.impl;
+                if (!std.meta.eql(vals.id, ind.id)) return false;
                 const other_vals = ctx.cache.items.items[ind.start .. ind.start + ind.len];
 
-                if (vals.len != other_vals.len) return false;
+                if (vals.items.len != other_vals.len) return false;
 
-                for (vals, ctx.cache.items.items[ind.start .. ind.start + ind.len]) |a1, b1| {
+                for (vals.items, ctx.cache.items.items[ind.start .. ind.start + ind.len]) |a1, b1| {
                     if (!std.meta.eql(a1, b1)) return false;
                 }
 
@@ -495,8 +498,8 @@ pub const GenericCacheContext = struct {
 };
 
 pub const GenericCacheKey = union(enum) {
-    items: []const GenericCacheItem,
-    impl: struct { start: u32, len: u32 },
+    items: struct { id: node.NodeId, items: []const GenericCacheItem },
+    impl: struct { id: node.NodeId, start: u32, len: u32 },
 };
 
 pub const GenericCacheValue = struct {
@@ -542,8 +545,13 @@ pub const GenericCache = struct {
         }
     }
 
-    pub fn put(self: *Self, node_id: node.NodeId, items: []const GenericCacheItem, ty: Type) !void {
-        const value = self.map.getEntry(.{ .items = items });
+    pub fn put(self: *Self, bind_id: node.NodeId, node_id: node.NodeId, items: []const GenericCacheItem, ty: Type) !void {
+        const value = self.map.getEntry(.{
+            .items = .{
+                .id = bind_id,
+                .items = items,
+            },
+        });
 
         if (value == null) {
             const starti = self.items.items.len;
@@ -552,6 +560,7 @@ pub const GenericCache = struct {
 
             const key = GenericCacheKey{
                 .impl = .{
+                    .id = bind_id,
                     .start = @truncate(starti),
                     .len = @truncate(endi - starti),
                 },
@@ -570,13 +579,23 @@ pub const GenericCache = struct {
         }
     }
 
-    pub inline fn get(self: *Self, items: []const GenericCacheItem) ?*GenericCacheValue {
-        const ptr = self.map.getPtr(.{ .items = items });
+    pub inline fn get(self: *Self, bind_id: node.NodeId, items: []const GenericCacheItem) ?*GenericCacheValue {
+        const ptr = self.map.getPtr(.{
+            .items = .{
+                .id = bind_id,
+                .items = items,
+            },
+        });
         return ptr;
     }
 
-    pub inline fn getEntry(self: *Self, items: []const GenericCacheItem) ?GenericCacheMap.Entry {
-        const ptr = self.map.getEntry(.{ .items = items });
+    pub inline fn getEntry(self: *Self, bind_id: node.NodeId, items: []const GenericCacheItem) ?GenericCacheMap.Entry {
+        const ptr = self.map.getEntry(.{
+            .items = .{
+                .id = bind_id,
+                .items = items,
+            },
+        });
         return ptr;
     }
 };
@@ -782,7 +801,17 @@ pub const TypeChecker = struct {
                 self.ty_hint = declared_ty;
                 const ty = try self.typeCheckNode(value.value);
 
-                if (declared_ty != null) {
+                std.debug.print("bind:  ", .{});
+                self.interner.printTy(ty);
+                std.debug.print("\n", .{});
+                if (declared_ty != null) blk1: {
+                    // Not generic record type
+                    // @TODO: should we do a better check?
+                    if (declared_ty.?.* == .unit and ty.* == .named) {
+                        try self.putDeclaredType(node_id, ty);
+                        break :blk1;
+                    }
+
                     if (!self.coerceNode(value.value, ty, declared_ty.?) and !canConvert(ty, declared_ty.?)) {
                         const declared_ty_str = self.interner.printTyToStr(declared_ty.?, self.arena);
                         const ty_str = self.interner.printTyToStr(ty, self.arena);
@@ -1135,7 +1164,7 @@ pub const TypeChecker = struct {
                     }
 
                     // Use previous cached value
-                    if (self.generic_cache.getEntry(generic_items.items)) |val| {
+                    if (self.generic_cache.getEntry(ref_node_id, generic_items.items)) |val| {
                         try self.generic_cache.node_map.put(node_id, val.value_ptr.id);
                         try self.generic_cache.node_to_key_map.put(node_id, val.key_ptr.*);
                         try self.declared_types.put(node_id, val.value_ptr.fn_ty);
@@ -1145,7 +1174,7 @@ pub const TypeChecker = struct {
                     const fn_ty = try self.typeCheckNode(func_node.id);
                     try self.declared_types.put(node_id, fn_ty);
 
-                    try self.generic_cache.put(node_id, generic_items.items, fn_ty);
+                    try self.generic_cache.put(ref_node_id, node_id, generic_items.items, fn_ty);
 
                     break :blk1 fn_ty;
                 } else null;
@@ -1437,19 +1466,55 @@ pub const TypeChecker = struct {
                         break :blk1 scope;
                     };
 
-                    const record_node_id = self.ty_hint.?.named;
-                    const record_ty = self.getDeclaredType(record_node_id).?.owned_type.base.record;
+                    const field_node = self.nodes[field_node_id.index].kind.record_field;
+                    const field_name = try self.analyzer.getSegment(field_node.name) orelse @panic("Unable to get field name");
+                    const field_scope = record_scope.children.get(field_name) orelse @panic("Unable to get field in funciton scope");
+                    const field_index = field_scope.kind.field.index;
+
+                    const gen_ty = if (record_scope.kind.type.generic) blk1: {
+                        std.debug.assert(field_scope.kind.field.generic != null);
+
+                        const old_bind = self.binding_node;
+                        const old_gen = self.generic_ctx;
+                        defer self.binding_node = old_bind;
+                        defer self.generic_ctx = old_gen;
+
+                        self.generic_ctx = node_id;
+                        self.binding_node = node_id;
+
+                        try self.generic_types.put(node_id, std.AutoHashMap(node.NodeId, Type).init(self.gpa));
+                        try self.generic_declared_types.put(node_id, std.AutoHashMap(node.NodeId, Type).init(self.gpa));
+
+                        const init_ty = try self.typeCheckNode(expr.value.?);
+                        const wild_ty = self.matchWildType(field_node.ty, init_ty);
+
+                        try self.putDeclaredType(field_scope.kind.field.generic.?, self.interner.typeTy(wild_ty));
+
+                        // Use previous cached value
+                        if (self.generic_cache.getEntry(ref_node_id, &.{.{ .type = wild_ty }})) |val| {
+                            try self.generic_cache.node_map.put(node_id, val.value_ptr.id);
+                            try self.generic_cache.node_to_key_map.put(node_id, val.key_ptr.*);
+                            try self.declared_types.put(node_id, val.value_ptr.fn_ty);
+                            break :blk1 val.value_ptr.fn_ty;
+                        }
+
+                        const rec_ty_base = try self.typeCheckNode(record_node.id);
+                        const rec_ty = self.interner.ownedTypeTy(node_id, rec_ty_base.type);
+                        try self.declared_types.put(node_id, rec_ty);
+
+                        try self.generic_cache.put(ref_node_id, node_id, &.{.{ .type = wild_ty }}, rec_ty);
+
+                        break :blk1 rec_ty;
+                    } else null;
+
+                    const record_ty_owned = gen_ty orelse self.getDeclaredType(self.ty_hint.?.named).?;
+                    const record_ty = &record_ty_owned.owned_type.base.record;
 
                     const fields_index = record_ty.fields.multi_type_keyed_impl;
                     const fields = &self.interner.multi_types_keyed.items[fields_index];
 
                     var unchecked_fields = std.bit_set.IntegerBitSet(256).initEmpty();
                     unchecked_fields.setRangeValue(.{ .start = 0, .end = fields.count() }, true);
-
-                    const field_node = self.nodes[field_node_id.index].kind.record_field;
-                    const field_name = try self.analyzer.getSegment(field_node.name) orelse @panic("Unable to get field name");
-                    const field_scope = record_scope.children.get(field_name) orelse @panic("Unable to get field in funciton scope");
-                    const field_index = field_scope.kind.field.index;
 
                     const exp_ty = fields.values()[field_index];
                     const value_ty = try self.typeCheckNode(expr.value.?);
@@ -1477,7 +1542,11 @@ pub const TypeChecker = struct {
                         }
                     }
 
-                    break :blk self.ty_hint.?;
+                    if (gen_ty) |gt| {
+                        break :blk self.interner.namedTy(gt.owned_type.binding);
+                    } else {
+                        break :blk self.ty_hint.?;
+                    }
                 } else {
                     const expr_ty = try self.typeCheckNode(expr.expr);
                     const value_expr = if (expr.value) |val| blk1: {
@@ -1540,6 +1609,15 @@ pub const TypeChecker = struct {
                 break :blk self.interner.arrayTy(first_ty, nodes.len);
             },
             .type_record => |rec| blk: {
+                if (self.generic_ctx == null) {
+                    const rec_path = self.analyzer.node_to_path.get(self.binding_node.?).?;
+                    const rec_scope = self.analyzer.getScopeFromPath(rec_path).?;
+
+                    if (rec_scope.kind.type.generic) {
+                        return self.interner.unitTy();
+                    }
+                }
+
                 const backing_field_ty = if (rec.backing_field) |f|
                     try self.typeCheckNode(f)
                 else
@@ -1699,7 +1777,7 @@ pub const TypeChecker = struct {
                 self.matchWildType(tref.ty, match_ty.optional.base)
             else
                 match_ty,
-            else => @panic("Unimlemented"),
+            else => std.debug.panic("Unimlemented {} ", .{node_value}),
         };
     }
 

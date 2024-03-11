@@ -34,6 +34,7 @@ pub const Scope = struct {
     pub fn setGeneric(self: *Scope, generic: bool) void {
         switch (self.kind) {
             .func => |*f| f.generic = generic,
+            .type => |*f| f.generic = generic,
             else => {},
         }
     }
@@ -102,10 +103,12 @@ pub const ScopeKind = union(enum) {
     },
     type: struct {
         references: u32,
+        generic: bool,
     },
     field: struct {
         index: u32,
         references: u32,
+        generic: ?node.NodeId = null,
     },
     local: struct {
         references: u32,
@@ -300,6 +303,7 @@ pub const Analyzer = struct {
                         const this_scope = try self.pushScope(try self.segment(value.name), .{
                             .type = .{
                                 .references = 0,
+                                .generic = self.last_generic != null,
                             },
                         });
                         this_scope.tags = value.tags;
@@ -708,18 +712,24 @@ pub const Analyzer = struct {
                 defer self.param_index = old_param_index;
 
                 const field_nodes = self.nodesRange(record.fields);
+                var generic = false;
                 for (field_nodes, 0..) |field, i| {
                     self.param_index = @truncate(i);
                     try self.analyzeNode(field);
+                    generic = generic or self.last_generic != null;
                 }
+
+                self.last_generic = if (generic) index else null;
             },
             .record_field => |field| {
                 try self.analyzeNode(field.ty);
+                const generic = self.last_generic;
                 {
                     const this_scope = try self.pushScope(try self.segment(field.name), .{
                         .field = .{
                             .index = self.param_index.?,
                             .references = 0,
+                            .generic = generic,
                         },
                     });
 
@@ -732,6 +742,8 @@ pub const Analyzer = struct {
                 if (field.default) |def| {
                     try self.analyzeNode(def);
                 }
+
+                self.last_generic = generic;
             },
             .type_union => |uni| {
                 if (uni.backing_field) |field| {
@@ -742,10 +754,15 @@ pub const Analyzer = struct {
                 defer self.param_index = old_param_index;
 
                 const variant_nodes = self.nodesRange(uni.variants);
+                var generic = false;
+
                 for (variant_nodes, 0..) |variant, i| {
                     self.param_index = @truncate(i);
                     try self.analyzeNode(variant);
+                    generic = generic or self.last_generic != null;
                 }
+
+                self.last_generic = if (generic) index else null;
             },
             .union_variant => |vari| {
                 if (!self.deferred) {
@@ -761,6 +778,8 @@ pub const Analyzer = struct {
                     try self.analyzeNode(ty);
                 }
 
+                const generic = self.last_generic;
+
                 {
                     const vnode = self.nodes[vari.name.index];
                     switch (vnode.kind) {
@@ -769,6 +788,7 @@ pub const Analyzer = struct {
                                 .field = .{
                                     .index = self.param_index.?,
                                     .references = 0,
+                                    .generic = if (vari.ty != null) generic else null,
                                 },
                             });
                             self.popScope();
@@ -779,6 +799,10 @@ pub const Analyzer = struct {
 
                 if (vari.index) |ind| {
                     try self.analyzeNode(ind);
+                }
+
+                if (vari.ty != null) {
+                    self.last_generic = generic;
                 }
             },
 
@@ -795,6 +819,7 @@ pub const Analyzer = struct {
                 const this_scope = try self.pushScope(try self.segment(tw), .{
                     .type = .{
                         .references = 0,
+                        .generic = false,
                     },
                 });
                 try self.path_to_node.put(this_scope.path, index);

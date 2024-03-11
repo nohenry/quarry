@@ -850,6 +850,20 @@ pub const Evaluator = struct {
                             break :blk1 scope;
                         };
 
+                        var rec_ty: ?typecheck.Type = null;
+
+                        if (self.typechecker.generic_types.contains(id)) {
+                            const gen_cache_key = self.typechecker.generic_cache.node_to_key_map.get(id).?;
+                            const gen_cache_val = self.typechecker.generic_cache.map.getPtr(gen_cache_key).?;
+
+                            rec_ty = self.typechecker.declared_types.get(id).?;
+
+                            if (gen_cache_val.func_node == null) {
+                                try self.evalTypeOrFunc(id, rec_ty.?, record_node.id);
+                                gen_cache_val.func_node = id;
+                            }
+                        }
+
                         const fields_index = record_ty.fields.multi_type_keyed_impl;
                         const fields = &self.typechecker.interner.multi_types_keyed.items[fields_index];
 
@@ -887,7 +901,7 @@ pub const Evaluator = struct {
                         const starti = self.instruction_ranges.items.len;
                         try self.instruction_ranges.appendSlice(ordered_fields.items);
 
-                        break :blk try self.createInstruction(.{
+                        const instr = try self.createInstruction(.{
                             .record_init = .{
                                 .exprs = .{
                                     .start = @truncate(starti),
@@ -895,6 +909,13 @@ pub const Evaluator = struct {
                                 },
                             },
                         }, id);
+
+                        if (rec_ty != null) {
+                            try self.instr_to_node.put(instr, id);
+                            return instr;
+                        } else {
+                            break :blk instr;
+                        }
                     },
                     else => {
                         const starti = self.instruction_ranges.items.len;
