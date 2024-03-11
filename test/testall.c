@@ -27,20 +27,20 @@ int main() {
     char test_value = 43;
     char test_value_doubled = test_value * 2;
     ASSERT_EQ(char, root_main(test_value), test_value_doubled);
-    /* ASSERT_EQ(char, root_test_array1(test_value), test_value_doubled); */
-    /* ASSERT_EQ(char, root_test_slice1(test_value), test_value_doubled); */
+    ASSERT_EQ(char, root_test_array1(test_value), test_value_doubled);
+    ASSERT_EQ(char, root_test_slice1(test_value), test_value_doubled);
     // ASSERT_EQ(char, root_test_array2(test_value), test_value_doubled);
-    /* ASSERT_EQ(char, root_test_slice2(test_value), test_value_doubled); */
-    /* ASSERT_EQ(char, root_test_array3(test_value), test_value_doubled); */
-    /* ASSERT_EQ(char, root_test_slice3(test_value), test_value_doubled); */
+    ASSERT_EQ(char, root_test_slice2(test_value), test_value_doubled);
+    ASSERT_EQ(char, root_test_array3(test_value), test_value_doubled);
+    ASSERT_EQ(char, root_test_slice3(test_value), test_value_doubled);
 
-    /* ASSERT_EQ(char, root_test_record1(test_value), test_value_doubled); */
-    /* ASSERT_EQ(char, root_test_record2(test_value), test_value_doubled); */
-    /* ASSERT_EQ(char, root_test_record3(test_value), test_value_doubled); */
-    /* ASSERT_EQ(char, root_test_record4(test_value), test_value_doubled); */
+    ASSERT_EQ(char, root_test_record1(test_value), test_value_doubled);
+    ASSERT_EQ(char, root_test_record2(test_value), test_value_doubled);
+    ASSERT_EQ(char, root_test_record3(test_value), test_value_doubled);
+    ASSERT_EQ(char, root_test_record4(test_value), test_value_doubled);
 
-    /* ASSERT_EQ(char, root_test_union1(test_value), test_value_doubled); */
-    /* ASSERT_EQ(char, root_test_union2(test_value), test_value_doubled); */
+    ASSERT_EQ(char, root_test_union1(test_value), test_value_doubled);
+    ASSERT_EQ(char, root_test_union2(test_value), test_value_doubled);
     // ASSERT_EQ(char, root_test_array4(test_value), test_value_doubled);
     return 0;
 }

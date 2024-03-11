@@ -9,7 +9,16 @@ let main = (uint8 argc) uint8 {
         i += 1
     }
 
+    wildness(1, 2, 3)
+    wildness(3, 0, 69)
+    wildness(3, 0, true)
+    wildness(false, 0, true)
+    wildness(false, i, true)
+
+    let res2 = foo(i.&)
+    let res3 = foo(i.&)
     let res = foo(value)
+    let res1 = foo(value)
     res
 }
 
@@ -17,7 +26,9 @@ let foo = (*T& a) T {
     a.*
 }
 
-/*
+let wildness = (*A a, *B b, *C c) {
+}
+
 let OneOf = type(int8) int8 A  | int8 B
 
 let test_union_double = (OneOf val) int8 { val.A * 2 }
@@ -88,6 +99,5 @@ let test_slice3 = (int8 value) int8 {
 let test_array3 = (int8 value) int8 {
     test_array_double([1, 2, value, 4])
 }
-*/
 
 extern let malloc = (int size) uint8&

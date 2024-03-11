@@ -246,9 +246,9 @@ pub const TypeInterner = struct {
     }
 
     pub fn multiTy(self: *Self, types: []const Type) Type {
-        const ty = self.types.getOrPut(.{ .multi_type = types }) catch unreachable;
-        if (ty.found_existing) {
-            return ty.value_ptr.*;
+        const ty = self.types.get(.{ .multi_type = types });
+        if (ty) |val| {
+            return val;
         }
 
         const starti = self.multi_types.items.len;
@@ -263,8 +263,9 @@ pub const TypeInterner = struct {
             },
         };
 
-        ty.value_ptr.* = val;
-        return ty.value_ptr.*;
+        self.types.put(val.*, val) catch unreachable;
+
+        return val;
     }
 
     pub fn multiTyKeyed(self: *Self, values: std.StringArrayHashMap(Type)) Type {
@@ -454,6 +455,132 @@ pub const TypeInterner = struct {
     }
 };
 
+pub const GenericCacheItem = union(enum) {
+    type: Type,
+};
+
+pub const GenericCacheContext = struct {
+    cache: *const GenericCache,
+
+    pub fn hash(ctx: @This(), key: GenericCacheKey) u64 {
+        var hasher = std.hash.Wyhash.init(0);
+        if (key == .impl) {
+            const vals = ctx.cache.items.items[key.impl.start .. key.impl.start + key.impl.len];
+            std.hash.autoHashStrat(&hasher, vals, .Deep);
+        } else {
+            std.hash.autoHashStrat(&hasher, key.items, .Deep);
+        }
+
+        return hasher.final();
+    }
+
+    pub fn eql(ctx: @This(), a: GenericCacheKey, b: GenericCacheKey) bool {
+        switch (a) {
+            .items => |vals| {
+                if (b != .impl) return false;
+                const ind = b.impl;
+                const other_vals = ctx.cache.items.items[ind.start .. ind.start + ind.len];
+
+                if (vals.len != other_vals.len) return false;
+
+                for (vals, ctx.cache.items.items[ind.start .. ind.start + ind.len]) |a1, b1| {
+                    if (!std.meta.eql(a1, b1)) return false;
+                }
+
+                return true;
+            },
+            else => return std.meta.eql(a, b),
+        }
+    }
+};
+
+pub const GenericCacheKey = union(enum) {
+    items: []const GenericCacheItem,
+    impl: struct { start: u32, len: u32 },
+};
+
+pub const GenericCacheValue = struct {
+    id: node.NodeId,
+    fn_ty: Type,
+    func_node: ?node.NodeId = null,
+};
+
+pub const GenericCacheMap = std.HashMap(
+    GenericCacheKey,
+    GenericCacheValue,
+    GenericCacheContext,
+    std.hash_map.default_max_load_percentage,
+);
+
+pub const GenericCache = struct {
+    arena: std.mem.Allocator,
+    items: std.ArrayList(GenericCacheItem),
+    map: GenericCacheMap,
+    node_map: std.AutoHashMap(node.NodeId, node.NodeId),
+    node_to_key_map: std.AutoHashMap(node.NodeId, GenericCacheKey),
+
+    const Self = @This();
+
+    pub fn init(arena: std.mem.Allocator) Self {
+        return .{
+            .arena = arena,
+            .items = std.ArrayList(GenericCacheItem).init(arena),
+            .map = undefined,
+            .node_map = std.AutoHashMap(node.NodeId, node.NodeId).init(arena),
+            .node_to_key_map = std.AutoHashMap(node.NodeId, GenericCacheKey).init(arena),
+        };
+    }
+
+    pub fn setup(self: *Self) void {
+        self.map = GenericCacheMap.initContext(self.arena, .{ .cache = self });
+    }
+
+    pub fn print(self: *const Self) void {
+        var it = self.map.iterator();
+        while (it.next()) |f| {
+            std.debug.print("Cache {} => {}\n", .{ f.key_ptr.*, f.value_ptr.* });
+        }
+    }
+
+    pub fn put(self: *Self, node_id: node.NodeId, items: []const GenericCacheItem, ty: Type) !void {
+        const value = self.map.getEntry(.{ .items = items });
+
+        if (value == null) {
+            const starti = self.items.items.len;
+            try self.items.appendSlice(items);
+            const endi = self.items.items.len;
+
+            const key = GenericCacheKey{
+                .impl = .{
+                    .start = @truncate(starti),
+                    .len = @truncate(endi - starti),
+                },
+            };
+
+            try self.map.put(key, .{
+                .id = node_id,
+                .fn_ty = ty,
+            });
+
+            try self.node_map.put(node_id, node_id);
+            try self.node_to_key_map.put(node_id, key);
+        } else {
+            try self.node_map.put(node_id, value.?.value_ptr.id);
+            try self.node_to_key_map.put(node_id, value.?.key_ptr.*);
+        }
+    }
+
+    pub inline fn get(self: *Self, items: []const GenericCacheItem) ?*GenericCacheValue {
+        const ptr = self.map.getPtr(.{ .items = items });
+        return ptr;
+    }
+
+    pub inline fn getEntry(self: *Self, items: []const GenericCacheItem) ?GenericCacheMap.Entry {
+        const ptr = self.map.getEntry(.{ .items = items });
+        return ptr;
+    }
+};
+
 pub const TypeChecker = struct {
     gpa: std.mem.Allocator,
     arena: std.mem.Allocator,
@@ -467,6 +594,7 @@ pub const TypeChecker = struct {
     types: std.AutoHashMap(node.NodeId, Type),
     declared_types: std.AutoHashMap(node.NodeId, Type),
 
+    generic_cache: GenericCache,
     generic_types: std.AutoHashMap(node.NodeId, std.AutoHashMap(node.NodeId, Type)),
     generic_declared_types: std.AutoHashMap(node.NodeId, std.AutoHashMap(node.NodeId, Type)),
 
@@ -504,6 +632,7 @@ pub const TypeChecker = struct {
             .analyzer = analyzer,
             .types = std.AutoHashMap(node.NodeId, Type).init(allocator),
             .declared_types = std.AutoHashMap(node.NodeId, Type).init(allocator),
+            .generic_cache = GenericCache.init(allocator),
             .generic_types = std.AutoHashMap(node.NodeId, std.AutoHashMap(node.NodeId, Type)).init(allocator),
             .generic_declared_types = std.AutoHashMap(node.NodeId, std.AutoHashMap(node.NodeId, Type)).init(allocator),
         };
@@ -511,6 +640,7 @@ pub const TypeChecker = struct {
 
     pub fn setup(self: *Self, evaluator: *eval.Evaluator) void {
         self.evaluator = evaluator;
+        self.generic_cache.setup();
     }
 
     pub fn typeCheck(self: *Self, nodes: []const node.NodeId) !TypeInfo {
@@ -977,9 +1107,11 @@ pub const TypeChecker = struct {
                     try self.generic_types.put(node_id, std.AutoHashMap(node.NodeId, Type).init(self.gpa));
                     try self.generic_declared_types.put(node_id, std.AutoHashMap(node.NodeId, Type).init(self.gpa));
 
+                    var generic_items = std.ArrayList(GenericCacheItem).init(self.arena);
+
                     {
                         // @TODO: check trailing block arg
-                        for (arg_nodes, 0..) |arg_id, i| {
+                        for (arg_nodes) |arg_id| {
                             // For the args passed in, we get the actual parameter index and compare the type
                             // of the arg with the type of the function's paramater at that index.
                             const param_node_id = self.analyzer.node_ref.get(arg_id) orelse @panic("unable to get node ref");
@@ -996,13 +1128,24 @@ pub const TypeChecker = struct {
                             const arg_ty = try self.typeCheckNode(arg_id);
                             const wild_ty = self.matchWildType(param.ty, arg_ty);
 
+                            try generic_items.append(.{ .type = wild_ty });
+
                             try self.putDeclaredType(param_scope.kind.local.generic.?, self.interner.typeTy(wild_ty));
-                            _ = i;
                         }
+                    }
+
+                    // Use previous cached value
+                    if (self.generic_cache.getEntry(generic_items.items)) |val| {
+                        try self.generic_cache.node_map.put(node_id, val.value_ptr.id);
+                        try self.generic_cache.node_to_key_map.put(node_id, val.key_ptr.*);
+                        try self.declared_types.put(node_id, val.value_ptr.fn_ty);
+                        break :blk1 val.value_ptr.fn_ty;
                     }
 
                     const fn_ty = try self.typeCheckNode(func_node.id);
                     try self.declared_types.put(node_id, fn_ty);
+
+                    try self.generic_cache.put(node_id, generic_items.items, fn_ty);
 
                     break :blk1 fn_ty;
                 } else null;

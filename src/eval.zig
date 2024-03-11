@@ -1054,13 +1054,24 @@ pub const Evaluator = struct {
                     const old_gen = self.generic_ctx;
                     defer self.generic_ctx = old_gen;
 
-                    self.generic_ctx = id;
+                    const gen_cache_key = self.typechecker.generic_cache.node_to_key_map.get(id).?;
+                    const gen_cache_val = self.typechecker.generic_cache.map.getPtr(gen_cache_key).?;
+
+                    self.generic_ctx = self.typechecker.generic_cache.node_map.get(id).?;
                     fn_ty = self.typechecker.declared_types.get(id).?;
 
-                    try self.evalTypeOrFunc(id, fn_ty, func_node.id);
+                    // If we've evaluated the instructions before, don't re evaluate.
+                    // We just reference the previous functions node (fid)
+                    if (gen_cache_val.func_node) |fid| {
+                        expr_id = try self.createInstructionWithType(.{ .direct_ref = fid }, fn_ty);
+                        try self.instr_to_node.put(expr_id, fid);
+                    } else {
+                        try self.evalTypeOrFunc(id, fn_ty, func_node.id);
+                        gen_cache_val.func_node = id;
 
-                    expr_id = try self.createInstructionWithType(.{ .direct_ref = id }, fn_ty);
-                    try self.instr_to_node.put(expr_id, id);
+                        expr_id = try self.createInstructionWithType(.{ .direct_ref = id }, fn_ty);
+                        try self.instr_to_node.put(expr_id, id);
+                    }
                 } else {
                     expr_id = try self.evalNode(inv.expr) orelse @panic("Invalid function");
                     fn_ty = self.typechecker.types.get(inv.expr) orelse @panic("No type info for callee");

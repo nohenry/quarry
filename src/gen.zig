@@ -129,7 +129,7 @@ pub const CodeGenerator = struct {
         var ty_it = self.evaluator.types.iterator();
         while (ty_it.next()) |ty| {
             const path = self.analyzer.node_to_path.get(ty.key_ptr.*) orelse @panic("can't get path");
-            const name = try self.manglePath(path);
+            const name = try self.manglePath(path, null);
             const named_struct = ir.LLVMStructCreateNamed(self.context, name.ptr);
 
             const tyty = self.typechecker.types.get(ty.value_ptr.node_id) orelse @panic("Unable to get type for named type");
@@ -170,7 +170,7 @@ pub const CodeGenerator = struct {
         }
     }
 
-    fn manglePath(self: *Self, path: analyze.Path) ![:0]const u8 {
+    fn manglePath(self: *Self, path: analyze.Path, node_id: ?node.NodeId) ![:0]const u8 {
         var mangled_name = std.ArrayList(u8).init(self.arena);
         var mangled_name_writer = mangled_name.writer();
         if (path.segments.len > 0) {
@@ -181,6 +181,9 @@ pub const CodeGenerator = struct {
                 try mangled_name_writer.writeAll(seg);
             }
         }
+        if (node_id) |id| {
+            try mangled_name_writer.print("_{}_{}", .{ id.file, id.index });
+        }
         try mangled_name_writer.writeByte(0);
 
         return mangled_name.items[0 .. mangled_name.items.len - 1 :0];
@@ -190,10 +193,8 @@ pub const CodeGenerator = struct {
         // const func_name = if (func.)
         var fid = bind_id;
         if (self.analyzer.node_ref.get(fid)) |new_id| {
-            std.log.info("Gen222 {}", .{new_id});
             fid = new_id;
         }
-        std.log.info("Gen {}", .{bind_id});
 
         const path = self.analyzer.node_to_path.get(fid) orelse @panic("can't get path");
         const fun_scope = self.analyzer.getScopeFromPath(path).?;
@@ -201,7 +202,7 @@ pub const CodeGenerator = struct {
         const func_name = if (fun_scope.tags.isSet(node.SymbolTag.external)) blk: {
             const name = path.segments[path.segments.len - 1];
             break :blk try self.arena.dupeZ(u8, name);
-        } else try self.manglePath(path);
+        } else try self.manglePath(path, if (fun_scope.kind.func.generic) bind_id else null); // @TODO: mangled names should use generic argument hash
 
         const fn_ty = self.typechecker.types.get(func.node_id) orelse self.typechecker.generic_types.get(bind_id).?.get(func.node_id).?;
         const llvm_fn_ty = try self.genType(fn_ty, .{});
@@ -605,7 +606,9 @@ pub const CodeGenerator = struct {
                 const callee_type = self.getType(call.expr) orelse @panic("Unable to get callee ty");
 
                 const llvm_fn_ty = try self.genType(callee_type, .{});
-                const global_val = self.globals.get(callee_binding) orelse self.globals.get(callee_id) orelse @panic("function not in global table");
+                const global_val = self.globals.get(callee_binding) orelse
+                    self.globals.get(callee_id) // get generic
+                orelse @panic("function not in global table");
 
                 const result = ir.LLVMBuildCall2(
                     self.builder,
